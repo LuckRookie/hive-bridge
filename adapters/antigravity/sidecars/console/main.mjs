@@ -110,13 +110,14 @@ async function fetchSnapshot(host, cwd) {
     claudeArgs.push('--cwd', cwd);
   }
 
-  const [codexRes, claudeRes, busRes, runsRes, slotsRes, metaRes] = await Promise.all([
+  const [codexRes, claudeRes, busRes, runsRes, slotsRes, metaRes, workersRes] = await Promise.all([
     runBridge(codexArgs, { timeout: 12000 }),
     runBridge(claudeArgs, { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'recent', '--limit', '60'], { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'runs', '--limit', '20'], { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'slot-list'], { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'meta-list'], { timeout: 12000 }),
+    runBridge(['bus', ...hostArgs, 'workers'], { timeout: 12000 }),
   ]);
 
   const errors = {};
@@ -169,6 +170,7 @@ async function fetchSnapshot(host, cwd) {
     claudeOnline: claudeRes.ok,
     busOnline: busRes.ok,
     slots,
+    workers: workersRes.ok ? parseJsonLines(workersRes.stdout) : [],
     sessions,
     claudeSessions,
     messages: busRes.ok ? parseJsonLines(busRes.stdout) : [],

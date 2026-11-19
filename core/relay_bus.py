@@ -104,6 +104,19 @@ def connect_db(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
         );
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workers (
+            agent       TEXT    PRIMARY KEY,
+            runtime     TEXT    DEFAULT '',
+            cwd         TEXT    DEFAULT '',
+            session_id  TEXT    DEFAULT '',
+            status      TEXT    NOT NULL,
+            pid         INTEGER DEFAULT 0,
+            updated_at  REAL    NOT NULL
+        );
+        """
+    )
     conn.commit()
     return conn
 
@@ -314,6 +327,104 @@ def cmd_recent(args):
         )
     for r in rows:
         emit(row_to_dict(r))
+
+
+def _upsert_worker(conn: sqlite3.Connection, agent: str, status: str, *, runtime: str = "", cwd: str = "", session_id: str = "", pid: int = 0):
+    conn.execute(
+        """
+        INSERT INTO workers (agent, runtime, cwd, session_id, status, pid, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(agent) DO UPDATE SET
+            runtime = COALESCE(NULLIF(excluded.runtime, ''), workers.runtime),
+            cwd = COALESCE(NULLIF(excluded.cwd, ''), workers.cwd),
+            session_id = COALESCE(NULLIF(excluded.session_id, ''), workers.session_id),
+            status = excluded.status,
+            pid = excluded.pid,
+            updated_at = excluded.updated_at
+        """,
+        (agent, runtime, cwd, session_id, status, pid, time.time()),
+    )
+    conn.commit()
+
+
+def cmd_wait(args):
+    """Block until an unread message arrives for --for <agent> (zero tokens while waiting).
+
+    Intended to be run as a background Bash command inside an already-open
+    Claude Desktop Remote / local Claude / local Codex window so Antigravity
+    can wake that live Desktop session automatically by posting to the board.
+    """
+    agent = args.recipient
+    cwd = norm_cwd(args.cwd) if args.cwd else ""
+    pid = os.getpid()
+    deadline = time.time() + args.timeout
+    last_hb = 0.0
+
+    def fetch_unread(conn: sqlite3.Connection):
+        clauses = ["acked_at IS NULL"]
+        params = []
+        if args.include_all:
+            clauses.append("(recipient = ? OR recipient = 'all')")
+            params.append(agent)
+        else:
+            clauses.append("recipient = ?")
+            params.append(agent)
+        if args.topic:
+            clauses.append("topic = ?")
+            params.append(args.topic)
+        if args.since_id is not None:
+            clauses.append("id > ?")
+            params.append(args.since_id)
+        where = "WHERE " + " AND ".join(clauses)
+        return conn.execute(f"SELECT * FROM messages {where} ORDER BY id ASC LIMIT ?", [*params, args.limit]).fetchall()
+
+    try:
+        while True:
+            now = time.time()
+            with connect_db() as conn:
+                rows = fetch_unread(conn)
+                if rows:
+                    _upsert_worker(conn, agent, "busy", runtime=args.runtime or "", cwd=cwd, session_id=args.session_id or "", pid=pid)
+                    emit({"event": "messages_received", "for": agent, "count": len(rows), "messages": [row_to_dict(r) for r in rows]})
+                    return
+                if now - last_hb >= 5.0:
+                    _upsert_worker(conn, agent, "waiting", runtime=args.runtime or "", cwd=cwd, session_id=args.session_id or "", pid=pid)
+                    last_hb = now
+            if now >= deadline:
+                with connect_db() as conn:
+                    _upsert_worker(conn, agent, "idle", runtime=args.runtime or "", cwd=cwd, session_id=args.session_id or "", pid=pid)
+                emit({"event": "timeout", "for": agent, "waitedSec": args.timeout})
+                return
+            time.sleep(min(args.interval, max(0.1, deadline - time.time())))
+    except KeyboardInterrupt:
+        with connect_db() as conn:
+            _upsert_worker(conn, agent, "offline", runtime=args.runtime or "", cwd=cwd, session_id=args.session_id or "", pid=0)
+        emit({"event": "interrupted", "for": agent})
+
+
+def cmd_workers(args):
+    """List seated workers and their live waiting/busy status."""
+    now = time.time()
+    with connect_db() as conn:
+        rows = conn.execute("SELECT * FROM workers ORDER BY updated_at DESC").fetchall()
+    for r in rows:
+        age = now - (r["updated_at"] or 0)
+        status = r["status"]
+        # Waiting workers refresh heartbeat every 5s; >25s stale means process ended
+        if status == "waiting" and age > 25:
+            status = "offline"
+        emit(
+            {
+                "agent": r["agent"],
+                "runtime": r["runtime"] or "",
+                "cwd": r["cwd"] or "",
+                "sessionId": r["session_id"] or "",
+                "status": status,
+                "pid": r["pid"] or 0,
+                "updatedAt": r["updated_at"],
+                "ageSec": round(age, 1),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +800,20 @@ def main():
     p.add_argument("--topic")
     p.add_argument("--since-id", type=int)
     p.add_argument("--limit", type=int, default=50)
+
+    p = sub.add_parser("wait", help="Block until an unread message arrives for --for <agent>")
+    p.add_argument("--for", dest="recipient", required=True, help="Worker seat name (e.g. claude, claude-ui)")
+    p.add_argument("--topic", help="Optional topic filter")
+    p.add_argument("--since-id", type=int)
+    p.add_argument("--include-all", action="store_true", help="Also wake on messages addressed to 'all'")
+    p.add_argument("--runtime", default="", help="Optional runtime label (claude/codex/antigravity)")
+    p.add_argument("--cwd", help="Working directory of this seated worker")
+    p.add_argument("--session-id", help="Optional session UUID for display")
+    p.add_argument("--interval", type=float, default=1.0, help="Poll interval seconds (default 1.0)")
+    p.add_argument("--timeout", type=int, default=600, help="Max seconds to wait before clean timeout (default 600)")
+    p.add_argument("--limit", type=int, default=10)
+
+    sub.add_parser("workers", help="List seated workers and their waiting/busy status")
 
     # Slots & session lifecycle
     p = sub.add_parser("slot-list")

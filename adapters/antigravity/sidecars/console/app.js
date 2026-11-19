@@ -103,12 +103,43 @@ function renderBoard(snap) {
   });
 
   const list = $('board-list');
+  const workers = snap.workers || [];
+  const workersBar = workers.length
+    ? `<div class="card" style="padding:7px 10px;">
+         <div class="meta" style="margin-bottom:4px;">Seated Workers (<code>hive-relay-bus wait</code>):</div>
+         <div class="card-actions" style="margin-top:0;">
+           ${workers
+             .map((w) => {
+               const cls = w.status === 'waiting' ? 'active' : w.status === 'busy' ? 'warn' : '';
+               return `<button type="button" class="btn sm" data-seat="${esc(w.agent)}" title="${esc(w.cwd || '')}">
+                 @${esc(w.agent)} <span class="pill ${cls}">${esc(w.status)}</span>
+               </button>`;
+             })
+             .join('')}
+         </div>
+       </div>`
+    : '';
+
   if (!filtered.length) {
-    list.innerHTML = '<div class="empty">No blackboard messages match the filter.</div>';
+    list.innerHTML = workersBar + '<div class="empty">No blackboard messages match the filter.</div>';
+    list.querySelectorAll('[data-seat]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const seat = btn.dataset.seat;
+        const sel = $('post-to');
+        if (![...sel.options].some((o) => o.value === seat)) {
+          const opt = document.createElement('option');
+          opt.value = seat;
+          opt.textContent = `@${seat}`;
+          sel.appendChild(opt);
+        }
+        sel.value = seat;
+        $('post-text').focus();
+      });
+    });
     return;
   }
 
-  list.innerHTML = filtered
+  list.innerHTML = workersBar + filtered
     .slice()
     .reverse()
     .map((m) => {
@@ -132,6 +163,21 @@ function renderBoard(snap) {
         </article>`;
     })
     .join('');
+
+  list.querySelectorAll('[data-seat]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const seat = btn.dataset.seat;
+      const sel = $('post-to');
+      if (![...sel.options].some((o) => o.value === seat)) {
+        const opt = document.createElement('option');
+        opt.value = seat;
+        opt.textContent = `@${seat}`;
+        sel.appendChild(opt);
+      }
+      sel.value = seat;
+      $('post-text').focus();
+    });
+  });
 
   list.querySelectorAll('[data-ack]').forEach((btn) => {
     btn.addEventListener('click', async () => {
