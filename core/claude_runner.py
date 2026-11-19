@@ -195,9 +195,70 @@ def run_claude(args, resume_id=None):
         sys.exit(rc if rc > 0 else 1)
 
 
+def _pid_alive(pid: int) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def cmd_list(args):
+    """List live Claude sessions from ~/.claude/sessions/*.json (both Desktop Remote & CLI)."""
+    claude_dir = Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude"))
+    sessions_dir = claude_dir / "sessions"
+    cwd_filter = os.path.abspath(os.path.expanduser(args.cwd)) if args.cwd else None
+
+    found = {}
+    if sessions_dir.is_dir():
+        for p in sorted(sessions_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            sid = data.get("sessionId")
+            if not sid:
+                continue
+            cwd = data.get("cwd") or ""
+            if cwd_filter and os.path.abspath(cwd) != cwd_filter:
+                continue
+            pid = data.get("pid")
+            alive = _pid_alive(pid) if isinstance(pid, int) else False
+            if not args.all and not alive:
+                continue
+            entry = {
+                "id": sid,
+                "name": data.get("name") or Path(cwd).name or sid[:12],
+                "cwd": cwd,
+                "pid": pid,
+                "alive": alive,
+                "entrypoint": data.get("entrypoint") or data.get("kind") or "cli",
+                "status": data.get("status") if alive else "stopped",
+                "startedAt": data.get("startedAt"),
+                "updatedAt": data.get("updatedAt") or int(p.stat().st_mtime * 1000),
+            }
+            # Keep newest / alive record per sessionId
+            prev = found.get(sid)
+            if not prev or (entry["alive"] and not prev["alive"]) or (entry["updatedAt"] or 0) > (prev["updatedAt"] or 0):
+                found[sid] = entry
+
+    items = sorted(found.values(), key=lambda x: (1 if x["alive"] else 0, x.get("updatedAt") or 0), reverse=True)
+    for item in items[: args.limit]:
+        emit(item)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("list", help="List live (or --all) Claude Desktop Remote & CLI sessions")
+    p.add_argument("--cwd")
+    p.add_argument("--all", action="store_true", help="Include stopped session records as well")
+    p.add_argument("--limit", type=int, default=30)
 
     def common(parser):
         parser.add_argument("--cwd", help="Project working directory")
@@ -218,6 +279,9 @@ def main():
     common(p)
 
     args = ap.parse_args()
+    if args.cmd == "list":
+        cmd_list(args)
+        return
     run_claude(args, resume_id=getattr(args, "thread", None))
 
 

@@ -104,10 +104,15 @@ async function fetchSnapshot(host, cwd) {
   const profile = (cfg.hosts && cfg.hosts[resolvedHost]) || {};
   const hostArgs = ['--host', resolvedHost];
   const codexArgs = ['codex', ...hostArgs, 'list', '--limit', '30'];
-  if (cwd) codexArgs.push('--cwd', cwd);
+  const claudeArgs = ['claude', ...hostArgs, 'list', '--all', '--limit', '30'];
+  if (cwd) {
+    codexArgs.push('--cwd', cwd);
+    claudeArgs.push('--cwd', cwd);
+  }
 
-  const [codexRes, busRes, runsRes, slotsRes, metaRes] = await Promise.all([
+  const [codexRes, claudeRes, busRes, runsRes, slotsRes, metaRes] = await Promise.all([
     runBridge(codexArgs, { timeout: 12000 }),
+    runBridge(claudeArgs, { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'recent', '--limit', '60'], { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'runs', '--limit', '20'], { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'slot-list'], { timeout: 12000 }),
@@ -116,6 +121,7 @@ async function fetchSnapshot(host, cwd) {
 
   const errors = {};
   if (!codexRes.ok) errors.codex = (codexRes.stderr || codexRes.stdout).trim();
+  if (!claudeRes.ok) errors.claude = (claudeRes.stderr || claudeRes.stdout).trim();
   if (!busRes.ok) errors.bus = (busRes.stderr || busRes.stdout).trim();
   if (!runsRes.ok) errors.runs = (runsRes.stderr || runsRes.stdout).trim();
 
@@ -127,8 +133,10 @@ async function fetchSnapshot(host, cwd) {
     if (m.runtime === 'codex' && m.threadId) metaByThread[m.threadId] = m;
   }
   const slotByThread = {};
+  const claudeSlotByThread = {};
   for (const sl of slots) {
     if (sl.runtime === 'codex' && sl.threadId) slotByThread[sl.threadId] = sl;
+    if (sl.runtime === 'claude' && sl.threadId) claudeSlotByThread[sl.threadId] = sl;
   }
 
   // Map active threadId -> latest running turnId from runs index so Sessions tab can steer/interrupt
@@ -146,16 +154,23 @@ async function fetchSnapshot(host, cwd) {
     lifecycle: metaByThread[s.id]?.kind || (slotByThread[s.id] ? 'slot' : ''),
   }));
 
+  const claudeSessions = (claudeRes.ok ? parseJsonLines(claudeRes.stdout) : []).map((s) => ({
+    ...s,
+    slot: claudeSlotByThread[s.id] || null,
+  }));
+
   return {
     configured: true,
     hosts: hostNames,
     host: resolvedHost,
     defaultCwd: profile.default_cwd || '',
-    online: codexRes.ok || busRes.ok,
+    online: codexRes.ok || claudeRes.ok || busRes.ok,
     codexOnline: codexRes.ok,
+    claudeOnline: claudeRes.ok,
     busOnline: busRes.ok,
     slots,
     sessions,
+    claudeSessions,
     messages: busRes.ok ? parseJsonLines(busRes.stdout) : [],
     runs,
     errors,

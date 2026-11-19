@@ -36,6 +36,9 @@
         <button type="button" class="tab" data-tab="sessions" role="tab" aria-selected="false">
           Codex <span id="count-sessions" class="badge"></span>
         </button>
+        <button type="button" class="tab" data-tab="claude" role="tab" aria-selected="false">
+          Claude <span id="count-claude" class="badge"></span>
+        </button>
         <button type="button" class="tab" data-tab="evidence" role="tab" aria-selected="false">
           Evidence <span id="count-runs" class="badge"></span>
         </button>
@@ -96,7 +99,17 @@
         <div id="sessions-list" class="list"></div>
       </section>
 
-      <!-- Tab 3: Evidence & Git Diff -->
+      <!-- Tab 3: Remote Claude Sessions (Desktop Remote & CLI) -->
+      <section id="panel-claude" class="panel">
+        <div class="toolbar">
+          <input id="filter-claude-cwd" class="input sm grow" type="text" placeholder="Filter Claude sessions by name or cwd…">
+          <label class="check"><input id="filter-claude-live" type="checkbox" checked> Live only</label>
+        </div>
+        <div id="claude-error" class="alert hidden"></div>
+        <div id="claude-list" class="list"></div>
+      </section>
+
+      <!-- Tab 4: Evidence & Git Diff -->
       <section id="panel-evidence" class="panel">
         <div class="toolbar">
           <input id="diff-cwd" class="input sm grow" type="text" placeholder="Remote git repo path (cwd)…">

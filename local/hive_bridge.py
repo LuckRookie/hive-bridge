@@ -298,7 +298,7 @@ def cmd_claude(args):
     if extra and extra[0] == "--":
         extra = extra[1:]
     if not extra:
-        sys.exit("usage: hive-bridge claude [--host H] <new|send> [args...]")
+        sys.exit("usage: hive-bridge claude [--host H] <list|new|send> [args...]")
     subcmd = extra[0]
     extra, stdin_data = _extract_local_file_flag(extra, "--prompt-file")
     extra = _apply_claude_defaults(profile, subcmd, extra)

@@ -178,7 +178,7 @@ function renderSessions(snap) {
   }
 
   const sessions = snap.sessions || [];
-  const slots = snap.slots || [];
+  const slots = (snap.slots || []).filter((sl) => sl.runtime === 'codex');
   $('count-sessions').textContent = sessions.length ? `${sessions.length}` : '';
 
   const q = ($('filter-cwd').value || '').trim().toLowerCase();
@@ -344,6 +344,146 @@ function renderSessions(snap) {
   });
 }
 
+function renderClaude(snap) {
+  const errEl = $('claude-error');
+  if (snap.errors?.claude) {
+    errEl.textContent = snap.errors.claude;
+    errEl.classList.remove('hidden');
+  } else {
+    errEl.classList.add('hidden');
+  }
+
+  const all = snap.claudeSessions || [];
+  const liveCount = all.filter((s) => s.alive).length;
+  $('count-claude').textContent = liveCount ? `${liveCount}` : (all.length ? `${all.length}` : '');
+
+  const q = ($('filter-claude-cwd').value || '').trim().toLowerCase();
+  const liveOnly = $('filter-claude-live').checked;
+
+  const claudeSlots = (snap.slots || []).filter((sl) => {
+    if (sl.runtime !== 'claude') return false;
+    if (!q) return true;
+    return `${sl.role || ''} ${sl.cwd || ''} ${sl.threadId || ''}`.toLowerCase().includes(q);
+  });
+
+  const filtered = all.filter((s) => {
+    if (liveOnly && !s.alive) return false;
+    if (!q) return true;
+    return `${s.name || ''} ${s.cwd || ''} ${s.id || ''}`.toLowerCase().includes(q);
+  });
+
+  const list = $('claude-list');
+  if (!claudeSlots.length && !filtered.length) {
+    list.innerHTML = `<div class="empty">${liveOnly ? 'No live Claude sessions running right now. Uncheck "Live only" to view recent stopped sessions.' : 'No Claude sessions found on this host.'}</div>`;
+    return;
+  }
+
+  const slotsHtml = claudeSlots.length
+    ? `<div class="meta" style="margin:2px 0;">Pinned Claude Slots (${claudeSlots.length})</div>` +
+      claudeSlots
+        .map(
+          (sl) => `
+          <article class="card unread">
+            <div class="card-head">
+              <div>
+                <span class="pill active">slot</span>
+                <span class="pill">claude:${esc(sl.role)}</span>
+                <strong>${esc(sl.name || sl.role)}</strong>
+              </div>
+              <span class="meta">${sl.turns || 0} turns · ${fmtTime(sl.updatedAt)}</span>
+            </div>
+            <div class="meta">${esc(sl.threadId)}</div>
+            <div class="meta">${esc(sl.cwd)}</div>
+            <div class="card-actions">
+              <button type="button" class="btn sm" data-copy="${esc(sl.threadId)}">Copy UUID</button>
+              <button type="button" class="btn sm" data-diff="${esc(sl.cwd)}">View Diff</button>
+              <button type="button" class="btn sm" data-crotate-cwd="${esc(sl.cwd)}" data-crotate-role="${esc(sl.role)}">Rotate</button>
+            </div>
+          </article>`,
+        )
+        .join('')
+    : '';
+
+  const sessionsHtml = filtered.length
+    ? `<div class="meta" style="margin:6px 0 2px;">Remote Claude Sessions (${filtered.length})</div>` +
+      filtered
+        .map((s) => {
+          const st = String(s.status || (s.alive ? 'live' : 'stopped'));
+          return `
+            <article class="card">
+              <div class="card-head">
+                <div>
+                  <strong>${esc(s.name || '(unnamed)')}</strong>
+                  <span class="pill">${esc(s.entrypoint || 'cli')}</span>
+                  ${s.slot ? `<span class="pill active">slot:${esc(s.slot.role)}</span>` : ''}
+                </div>
+                <span class="pill ${s.alive ? 'active' : ''}">${esc(st)}${s.pid && s.alive ? ` · pid ${s.pid}` : ''}</span>
+              </div>
+              <div class="meta">${esc(s.id)}</div>
+              ${s.cwd ? `<div class="meta">${esc(s.cwd)}</div>` : ''}
+              <div class="card-actions">
+                <button type="button" class="btn sm" data-copy="${esc(s.id)}">Copy UUID</button>
+                ${s.cwd ? `<button type="button" class="btn sm" data-diff="${esc(s.cwd)}">View Diff</button>` : ''}
+                <button type="button" class="btn sm primary" data-msg-claude="${esc(s.name || s.id.slice(0, 8))}">Message on Board</button>
+              </div>
+            </article>`;
+        })
+        .join('')
+    : '';
+
+  list.innerHTML = slotsHtml + sessionsHtml;
+
+  list.querySelectorAll('[data-copy]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard?.writeText(btn.dataset.copy);
+      showToast('Copied Claude session UUID');
+    });
+  });
+
+  list.querySelectorAll('[data-diff]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      $('diff-cwd').value = btn.dataset.diff;
+      switchTab('evidence');
+      loadGitDiff();
+    });
+  });
+
+  list.querySelectorAll('[data-msg-claude]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      $('post-to').value = 'claude';
+      $('post-topic').value = btn.dataset.msgClaude || 'claude';
+      switchTab('board');
+      $('post-text').focus();
+    });
+  });
+
+  list.querySelectorAll('[data-crotate-role]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const cwd = btn.dataset.crotateCwd;
+      const role = btn.dataset.crotateRole;
+      btn.disabled = true;
+      btn.textContent = 'Rotating…';
+      try {
+        const res = await apiFetch('/api/slot/rotate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: state.host, runtime: 'claude', cwd, role }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          showToast(`Rotated claude:${role}`);
+          refresh(true);
+        } else {
+          showToast(`Rotate failed: ${json.error}`);
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Rotate';
+      }
+    });
+  });
+}
+
 function renderRuns(snap) {
   const runs = snap.runs || [];
   $('count-runs').textContent = runs.length ? `${runs.length}` : '';
@@ -452,6 +592,7 @@ async function refresh(force = false) {
     setStatus(snap.online ? 'ok' : 'err', snap.online ? `Live · ${snap.host}` : 'Offline');
     renderBoard(snap);
     renderSessions(snap);
+    renderClaude(snap);
     renderRuns(snap);
   } catch (err) {
     setStatus('err', 'Error');
@@ -473,6 +614,8 @@ $('filter-topic').addEventListener('change', () => state.snapshot && renderBoard
 $('filter-to').addEventListener('change', () => state.snapshot && renderBoard(state.snapshot));
 $('filter-unread').addEventListener('change', () => state.snapshot && renderBoard(state.snapshot));
 $('filter-cwd').addEventListener('input', () => state.snapshot && renderSessions(state.snapshot));
+$('filter-claude-cwd').addEventListener('input', () => state.snapshot && renderClaude(state.snapshot));
+$('filter-claude-live').addEventListener('change', () => state.snapshot && renderClaude(state.snapshot));
 $('btn-diff').addEventListener('click', loadGitDiff);
 
 $('btn-doctor').addEventListener('click', async () => {
