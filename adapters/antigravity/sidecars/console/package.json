@@ -1,0 +1,6 @@
+{
+  "name": "hive_bridge_console",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Native Antigravity side-pane console for Hive Bridge"
+}

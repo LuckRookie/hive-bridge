@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="hb-amber" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+    <linearGradient id="hb-teal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14B8A6"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+  </defs>
+  <!-- Left local hexagon -->
+  <polygon points="36,36 54,46 54,68 36,78 18,68 18,46" fill="url(#hb-teal)" stroke="#0F172A" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Right remote hexagon -->
+  <polygon points="92,36 110,46 110,68 92,78 74,68 74,46" fill="url(#hb-amber)" stroke="#0F172A" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Bottom shared blackboard hexagon -->
+  <polygon points="64,66 82,76 82,98 64,108 46,98 46,76" fill="#334155" stroke="#0F172A" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Bridge arch connecting left and right -->
+  <path d="M 46 57 Q 64 36 82 57" fill="none" stroke="#F8FAFC" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M 46 57 Q 64 36 82 57" fill="none" stroke="#0F172A" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 4"/>
+  <!-- Nodes -->
+  <circle cx="36" cy="57" r="5" fill="#F8FAFC"/>
+  <circle cx="92" cy="57" r="5" fill="#F8FAFC"/>
+  <circle cx="64" cy="87" r="5" fill="#F59E0B"/>
+</svg>

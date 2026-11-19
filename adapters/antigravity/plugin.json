@@ -1,0 +1,13 @@
+{
+  "name": "hive-bridge",
+  "displayName": "Hive Bridge",
+  "version": "0.1.0",
+  "description": "Zero-daemon bridge connecting local Antigravity with remote SSH Codex (live Desktop-visible), Claude sessions, a shared SQLite blackboard, a native side-pane console, and a Swarm Guest Bee integration.",
+  "logo": "assets/logo.svg",
+  "repository": "https://github.com/LuckRookie/hive-bridge",
+  "suggestedPrompts": [
+    "Check Hive Bridge connectivity and list remote Codex sessions",
+    "Post a task to the shared board for remote Claude and dispatch implementation to Codex",
+    "Attach my remote Codex session as a Guest Bee inside an Antigravity Swarm"
+  ]
+}
