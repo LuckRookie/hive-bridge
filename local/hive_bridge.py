@@ -79,8 +79,18 @@ def ssh_base_args(profile: dict) -> list[str]:
     ]
 
 
+def is_local_profile(profile: dict) -> bool:
+    return profile.get("transport") == "local" or profile.get("ssh") == "local"
+
+
+def exec_cmd_args(profile: dict, remote_cmd: str) -> list[str]:
+    if is_local_profile(profile):
+        return ["/bin/bash", "-c", remote_cmd]
+    return [*ssh_base_args(profile), remote_cmd]
+
+
 def run_remote(profile: dict, remote_cmd: str, stdin_data: str | None = None, capture: bool = False):
-    cmd = [*ssh_base_args(profile), remote_cmd]
+    cmd = exec_cmd_args(profile, remote_cmd)
     if capture:
         return subprocess.run(cmd, input=stdin_data, capture_output=True, text=True)
     return subprocess.run(cmd, input=stdin_data, text=True)
@@ -164,8 +174,8 @@ def _bus_call(profile: dict, bus_args: list[str], stdin_data: str | None = None)
 
 
 def _run_remote_streaming(profile: dict, remote_cmd: str, stdin_data: str | None = None) -> tuple[int, list[dict]]:
-    """Run remote command streaming stdout to our stdout while also parsing JSON lines."""
-    cmd = [*ssh_base_args(profile), remote_cmd]
+    """Run remote (or local) command streaming stdout to our stdout while also parsing JSON lines."""
+    cmd = exec_cmd_args(profile, remote_cmd)
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE if stdin_data is not None else None,
@@ -273,11 +283,27 @@ def _apply_claude_defaults(profile: dict, subcmd: str, extra: list[str]) -> list
     return out
 
 
+def _extract_host_flag(extra: list[str], initial_host: str | None) -> tuple[str | None, list[str]]:
+    """Allow --host <alias> anywhere in passthrough subcommands (before or after subcmd)."""
+    host = initial_host
+    out = []
+    i = 0
+    while i < len(extra):
+        if extra[i] == "--host" and i + 1 < len(extra):
+            host = extra[i + 1]
+            i += 2
+            continue
+        out.append(extra[i])
+        i += 1
+    return host, out
+
+
 def cmd_codex(args):
-    _, profile = resolve_host(args.host)
     extra = list(args.extra)
     if extra and extra[0] == "--":
         extra = extra[1:]
+    host, extra = _extract_host_flag(extra, args.host)
+    _, profile = resolve_host(host)
     if not extra:
         sys.exit("usage: hive-bridge codex [--host H] <list|new|send|steer|interrupt|delete> [args...]")
     subcmd = extra[0]
@@ -293,10 +319,11 @@ def cmd_codex(args):
 
 
 def cmd_claude(args):
-    _, profile = resolve_host(args.host)
     extra = list(args.extra)
     if extra and extra[0] == "--":
         extra = extra[1:]
+    host, extra = _extract_host_flag(extra, args.host)
+    _, profile = resolve_host(host)
     if not extra:
         sys.exit("usage: hive-bridge claude [--host H] <list|new|send> [args...]")
     subcmd = extra[0]
@@ -312,10 +339,11 @@ def cmd_claude(args):
 
 
 def cmd_bus(args):
-    _, profile = resolve_host(args.host)
     extra = list(args.extra)
     if extra and extra[0] == "--":
         extra = extra[1:]
+    host, extra = _extract_host_flag(extra, args.host)
+    _, profile = resolve_host(host)
     if not extra:
         sys.exit("usage: hive-bridge bus [--host H] <subcommand> [args...]")
     extra, stdin_data = _extract_local_file_flag(extra, "--body-file")

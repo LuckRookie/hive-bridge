@@ -43,7 +43,10 @@ install_local() {
   mkdir -p "${LOCAL_BIN_DIR}" "${LOCAL_CONFIG_DIR}" "${HOME}/.gemini/config/plugins" "${HOME}/.ssh"
 
   ln -sfn "${REPO_DIR}/local/hive_bridge.py" "${LOCAL_BIN_DIR}/hive-bridge"
-  info "Linked CLI -> ${LOCAL_BIN_DIR}/hive-bridge"
+  ln -sfn "${REPO_DIR}/core/relay_bus.py" "${LOCAL_BIN_DIR}/hive-relay-bus"
+  ln -sfn "${REPO_DIR}/core/codex_daemon.py" "${LOCAL_BIN_DIR}/hive-codex-daemon"
+  ln -sfn "${REPO_DIR}/core/claude_runner.py" "${LOCAL_BIN_DIR}/hive-claude-runner"
+  info "Linked local CLIs -> ${LOCAL_BIN_DIR}/hive-{bridge,relay-bus,codex-daemon,claude-runner}"
 
   if [ -e "${AGY_PLUGIN_DIR}" ] && [ ! -L "${AGY_PLUGIN_DIR}" ]; then
     die "${AGY_PLUGIN_DIR} already exists and is not a symlink; remove or back it up first."
@@ -63,17 +66,33 @@ install_local() {
     info "Detected local ~/.codex -> linked local skill at ~/.codex/skills/hive-bridge-local"
   fi
 
-  if [ ! -f "${LOCAL_CONFIG_FILE}" ]; then
-    cat > "${LOCAL_CONFIG_FILE}" <<'EOF'
-{
-  "default_host": "",
-  "hosts": {}
+  python3 - "${LOCAL_CONFIG_FILE}" "${HOME}" <<'PY'
+import json, sys
+from pathlib import Path
+
+cfg_path = Path(sys.argv[1])
+home_dir = sys.argv[2]
+if cfg_path.exists():
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+else:
+    cfg = {"default_host": "local", "hosts": {}}
+
+cfg.setdefault("hosts", {})
+existing = cfg["hosts"].get("local", {})
+cfg["hosts"]["local"] = {
+    "transport": "local",
+    "ssh": "local",
+    "default_cwd": existing.get("default_cwd", home_dir),
+    "codex_sandbox": existing.get("codex_sandbox", "danger-full-access"),
+    "codex_approval_policy": existing.get("codex_approval_policy", "never"),
+    "claude_permission_mode": existing.get("claude_permission_mode", "bypassPermissions"),
 }
-EOF
-    info "Initialized config -> ${LOCAL_CONFIG_FILE}"
-  else
-    info "Kept existing config -> ${LOCAL_CONFIG_FILE}"
-  fi
+if not cfg.get("default_host"):
+    cfg["default_host"] = "local"
+
+cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+  info "Ensured 'local' host profile in ${LOCAL_CONFIG_FILE}"
 
   case ":${PATH}:" in
     *":${LOCAL_BIN_DIR}:"*) ;;

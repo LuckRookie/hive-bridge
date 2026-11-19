@@ -312,3 +312,43 @@ html, body {
   font-size: 12px;
   z-index: 99;
 }
+
+.bubble-prompt {
+  background: color-mix(in srgb, var(--hb-primary) 11%, var(--hb-card));
+  border: 1px solid color-mix(in srgb, var(--hb-primary) 28%, var(--hb-border));
+  border-radius: 8px;
+  padding: 8px 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubble-assistant {
+  background: var(--hb-card);
+  border: 1px solid var(--hb-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-item {
+  background: var(--hb-muted);
+  border: 1px solid var(--hb-border);
+  border-radius: 6px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.tool-item summary {
+  cursor: pointer;
+  font-family: var(--hb-mono);
+  font-size: 11px;
+  color: var(--hb-fg-muted);
+}
+.tool-item pre {
+  margin: 6px 0 0;
+  font-family: var(--hb-mono);
+  font-size: 11px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+}

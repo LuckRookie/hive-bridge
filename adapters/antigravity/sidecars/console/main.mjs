@@ -5,7 +5,7 @@
  * Reads remote host state on demand over OpenSSH ControlMaster via the local
  * `hive-bridge` CLI (~/.local/bin/hive-bridge). Zero persistent remote daemons.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -375,6 +375,119 @@ app.api(
     if (data.apply) snapshotCache.clear();
     if (!res.ok) return { ok: false, error: (res.stderr || res.stdout).trim() };
     return { ok: true, ...(parseJsonSingle(res.stdout) || {}) };
+  },
+  'POST',
+);
+
+app.api(
+  '/api/stream',
+  async (data) => {
+    if (!data.out) return { ok: false, error: 'missing out directory' };
+    const args = ['bus'];
+    if (data.host) args.push('--host', data.host);
+    args.push('stream', '--out', String(data.out), '--offset', String(Number(data.offset) || 0));
+    const res = await runBridge(args, { timeout: 12000 });
+    if (!res.ok) return { ok: false, error: (res.stderr || res.stdout).trim() };
+    return { ok: true, ...(parseJsonSingle(res.stdout) || {}) };
+  },
+  'GET',
+);
+
+app.api(
+  '/api/chat/send',
+  async (data) => {
+    const host = String(data.host || '');
+    const runtime = data.runtime === 'claude' ? 'claude' : 'codex';
+    const text = String(data.text || '').trim();
+    const threadId = data.threadId ? String(data.threadId) : '';
+    const cwd = data.cwd ? String(data.cwd) : '';
+    if (!text) return { ok: false, error: 'message text is required' };
+    if (!threadId && !cwd) return { ok: false, error: 'threadId or cwd is required' };
+
+    const args = [runtime];
+    if (host) args.push('--host', host);
+    if (threadId) {
+      args.push('send', '--thread', threadId);
+      if (runtime === 'claude' && cwd) args.push('--cwd', cwd);
+    } else {
+      args.push('new', '--cwd', cwd);
+      if (data.name) args.push('--name', String(data.name));
+    }
+    args.push('--stdin');
+
+    return new Promise((resolve) => {
+      const child = spawn(BRIDGE_BIN, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: true,
+      });
+      let resolved = false;
+      let buf = '';
+      let errBuf = '';
+      let foundThread = threadId;
+
+      const finish = (payload) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        snapshotCache.clear();
+        try {
+          child.unref();
+        } catch {}
+        resolve(payload);
+      };
+
+      const timer = setTimeout(() => {
+        finish({
+          ok: true,
+          pending: true,
+          runtime,
+          threadId: foundThread,
+          cwd,
+          note: 'Turn started in background; refresh Runs to attach stream.',
+        });
+      }, 9000);
+
+      child.stdout.on('data', (chunk) => {
+        buf += chunk.toString('utf-8');
+        let idx;
+        while ((idx = buf.indexOf('\n')) !== -1) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const ev = JSON.parse(line);
+            if (ev.threadId) foundThread = ev.threadId;
+            if (ev.event === 'turn_started' && ev.out) {
+              finish({
+                ok: true,
+                runtime,
+                threadId: ev.threadId || foundThread,
+                turnId: ev.turnId || String(ev.pid || ''),
+                out: ev.out,
+                cwd,
+              });
+            }
+          } catch {}
+        }
+      });
+
+      child.stderr.on('data', (chunk) => {
+        errBuf += chunk.toString('utf-8');
+      });
+
+      child.on('exit', (code) => {
+        if (!resolved) {
+          if (code === 0) {
+            finish({ ok: true, runtime, threadId: foundThread, cwd });
+          } else {
+            finish({ ok: false, error: errBuf.trim() || `exited with code ${code}` });
+          }
+        }
+      });
+
+      child.stdin.write(text);
+      child.stdin.end();
+    });
   },
   'POST',
 );

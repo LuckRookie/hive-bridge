@@ -65,9 +65,10 @@ def run_claude(args, resume_id=None):
     prompt = read_prompt(args)
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
+    Path(out_dir, "prompt.txt").write_text(prompt, encoding="utf-8")
     cwd = os.path.abspath(args.cwd) if args.cwd else os.getcwd()
 
-    cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose"]
+    cmd = [claude_bin, "-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose"]
     if resume_id:
         cmd.extend(["--resume", resume_id])
     if args.model:
@@ -79,6 +80,7 @@ def run_claude(args, resume_id=None):
     started_at = time.time()
     session_id = resume_id or ""
     messages = []
+    other_items = []
     final_result = None
     error_msg = None
     token_usage = None
@@ -138,7 +140,20 @@ def run_claude(args, resume_id=None):
                     emit({"event": "turn_started", "runtime": "claude", "threadId": session_id, "pid": proc.pid, "out": out_dir})
                 if ev.get("type") == "assistant":
                     content = (ev.get("message") or {}).get("content") or []
-                    text_parts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+                    text_parts = []
+                    for c in content:
+                        if not isinstance(c, dict):
+                            continue
+                        if c.get("type") == "text" and c.get("text"):
+                            text_parts.append(c["text"])
+                        elif c.get("type") == "tool_use":
+                            other_items.append(
+                                {
+                                    "type": "tool_use",
+                                    "tool": c.get("name"),
+                                    "input": c.get("input"),
+                                }
+                            )
                     if text_parts:
                         messages.append("\n".join(text_parts))
                 elif ev.get("type") == "result":
@@ -171,7 +186,7 @@ def run_claude(args, resume_id=None):
         "messages": messages,
         "commands": [],
         "fileChanges": [],
-        "otherItems": [],
+        "otherItems": other_items,
         "approvalsDeclined": [],
         "tokenUsage": token_usage,
     }

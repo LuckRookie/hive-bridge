@@ -22,19 +22,24 @@ import glob
 import itertools
 import json
 import os
+import shutil
 import stat
 import sys
 import time
 from pathlib import Path
 
-from websockets.asyncio.client import unix_connect
+try:
+    from websockets.asyncio.client import unix_connect
+except ImportError:
+    unix_connect = None
 
 CLIENT_NAME = "hive-bridge-codex"
 STATE_DIR = Path(os.environ.get("HIVE_BRIDGE_HOME", Path.home() / ".hive-bridge"))
 RUNS_INDEX = STATE_DIR / "runs.jsonl"
+MACOS_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
 
 
-def find_socket() -> str:
+def find_socket() -> str | None:
     override = os.environ.get("CODEX_DAEMON_SOCKET")
     if override and os.path.exists(override) and stat.S_ISSOCK(os.stat(override).st_mode):
         return override
@@ -43,9 +48,22 @@ def find_socket() -> str:
         for p in glob.glob(f"/tmp/codex-daemon-{os.getuid()}/*")
         if not p.endswith(".lock") and os.path.exists(p) and stat.S_ISSOCK(os.stat(p).st_mode)
     ]
-    if len(paths) != 1:
-        sys.exit(f"expected exactly one Codex daemon socket, found {paths or 'none'}; is the daemon running?")
-    return paths[0]
+    if len(paths) == 1:
+        return paths[0]
+    if len(paths) > 1:
+        sys.exit(f"expected at most one Codex daemon socket, found {paths}")
+    return None
+
+
+def find_stdio_codex_bin() -> str | None:
+    for candidate in (
+        os.environ.get("CODEX_STDIO_BIN") or "",
+        shutil.which("codex") or "",
+        MACOS_BUNDLED_CODEX,
+    ):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def record_run(entry: dict):
@@ -58,8 +76,9 @@ def record_run(entry: dict):
 
 
 class Daemon:
-    def __init__(self, ws, event_log=None, approval_policy="never"):
+    def __init__(self, *, ws=None, proc=None, event_log=None, approval_policy="never"):
         self.ws = ws
+        self.proc = proc
         self.event_log = event_log
         self.approval_policy = approval_policy
         self.ids = itertools.count(1)
@@ -70,8 +89,25 @@ class Daemon:
 
     @classmethod
     async def connect(cls, event_log=None, approval_policy="never"):
-        ws = await unix_connect(find_socket(), "ws://localhost/", max_size=None)
-        d = cls(ws, event_log, approval_policy=approval_policy)
+        sock = find_socket()
+        if sock:
+            if unix_connect is None:
+                sys.exit("websockets >= 13 is required to connect to Codex daemon Unix socket")
+            ws = await unix_connect(sock, "ws://localhost/", max_size=None)
+            d = cls(ws=ws, event_log=event_log, approval_policy=approval_policy)
+        else:
+            stdio_bin = find_stdio_codex_bin()
+            if not stdio_bin:
+                sys.exit("no Codex daemon socket found and no local codex binary available")
+            proc = await asyncio.create_subprocess_exec(
+                stdio_bin,
+                "app-server",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                limit=16 * 1024 * 1024,
+            )
+            d = cls(proc=proc, event_log=event_log, approval_policy=approval_policy)
         await d.request(
             "initialize",
             {
@@ -82,20 +118,33 @@ class Daemon:
         await d._send({"method": "initialized"})
         return d
 
+    async def _handle_raw(self, raw_str: str):
+        raw_str = raw_str.strip()
+        if not raw_str:
+            return
+        msg = json.loads(raw_str)
+        if self.event_log:
+            self.event_log.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            self.event_log.flush()
+        if "id" in msg and "method" not in msg:
+            fut = self.pending.pop(msg["id"], None)
+            if fut and not fut.done():
+                fut.set_result(msg)
+        elif "id" in msg:
+            await self._answer_server_request(msg)
+        else:
+            await self.events.put(msg)
+
     async def _read(self):
-        async for raw in self.ws:
-            msg = json.loads(raw)
-            if self.event_log:
-                self.event_log.write(json.dumps(msg, ensure_ascii=False) + "\n")
-                self.event_log.flush()
-            if "id" in msg and "method" not in msg:
-                fut = self.pending.pop(msg["id"], None)
-                if fut and not fut.done():
-                    fut.set_result(msg)
-            elif "id" in msg:
-                await self._answer_server_request(msg)
-            else:
-                await self.events.put(msg)
+        if self.ws is not None:
+            async for raw in self.ws:
+                await self._handle_raw(raw)
+        elif self.proc is not None and self.proc.stdout is not None:
+            while True:
+                line = await self.proc.stdout.readline()
+                if not line:
+                    break
+                await self._handle_raw(line.decode("utf-8", errors="replace"))
 
     async def _answer_server_request(self, msg):
         # Honor the caller's configured approval policy: when 'never', accept; otherwise decline & record.
@@ -123,7 +172,12 @@ class Daemon:
             )
 
     async def _send(self, msg):
-        await self.ws.send(json.dumps(msg, ensure_ascii=False))
+        payload = json.dumps(msg, ensure_ascii=False)
+        if self.ws is not None:
+            await self.ws.send(payload)
+        elif self.proc is not None and self.proc.stdin is not None:
+            self.proc.stdin.write((payload + "\n").encode("utf-8"))
+            await self.proc.stdin.drain()
 
     async def request(self, method, params=None, timeout=120):
         rid = next(self.ids)
@@ -136,7 +190,17 @@ class Daemon:
         return msg["result"]
 
     async def close(self):
-        await self.ws.close()
+        if self.ws is not None:
+            await self.ws.close()
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                await asyncio.wait_for(self.proc.wait(), timeout=3)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
         self.reader.cancel()
 
 
@@ -172,6 +236,7 @@ async def run_turn(d: Daemon, thread_id: str, prompt: str, args, cwd: str = "", 
             params["outputSchema"] = json.load(f)
 
     out_dir = os.path.abspath(args.out)
+    Path(out_dir, "prompt.txt").write_text(prompt, encoding="utf-8")
     started_at = time.time()
     turn_id = (await d.request("turn/start", params))["turn"]["id"]
     with open(os.path.join(out_dir, "turn.json"), "w", encoding="utf-8") as f:

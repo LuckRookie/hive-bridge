@@ -3,9 +3,24 @@ const apiFetch = (url, opts) =>
 
 const state = {
   host: '',
-  tab: 'board',
+  tab: 'live',
   snapshot: null,
   pollTimer: null,
+  live: {
+    out: '',
+    offset: 0,
+    runtime: '',
+    threadId: '',
+    turnId: '',
+    cwd: '',
+    name: '',
+    status: 'idle',
+    prompt: '',
+    streamText: '',
+    tools: [],
+    summary: null,
+    timer: null,
+  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -289,6 +304,7 @@ function renderSessions(snap) {
               <div class="meta">${esc(s.id)}</div>
               ${s.cwd ? `<div class="meta">${esc(s.cwd)}</div>` : ''}
               <div class="card-actions">
+                <button type="button" class="btn sm primary" data-open-chat-rt="codex" data-open-chat-id="${esc(s.id)}" data-open-chat-cwd="${esc(s.cwd || '')}" data-open-chat-name="${esc(s.name || '')}" data-open-chat-out="${esc(s.activeTurn?.out || '')}">Chat / Watch</button>
                 <button type="button" class="btn sm" data-copy="${esc(s.id)}">Copy UUID</button>
                 ${s.cwd ? `<button type="button" class="btn sm" data-diff="${esc(s.cwd)}">View Diff</button>` : ''}
                 ${isActive && turnId ? `<button type="button" class="btn sm danger" data-int-thread="${esc(s.id)}" data-int-turn="${esc(turnId)}">Interrupt</button>` : ''}
@@ -329,6 +345,18 @@ function renderSessions(snap) {
         btn.disabled = false;
         btn.textContent = 'Rotate';
       }
+    });
+  });
+
+  list.querySelectorAll('[data-open-chat-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openLiveTarget({
+        runtime: btn.dataset.openChatRt,
+        threadId: btn.dataset.openChatId,
+        cwd: btn.dataset.openChatCwd,
+        name: btn.dataset.openChatName,
+        out: btn.dataset.openChatOut || '',
+      });
     });
   });
 
@@ -468,9 +496,10 @@ function renderClaude(snap) {
               <div class="meta">${esc(s.id)}</div>
               ${s.cwd ? `<div class="meta">${esc(s.cwd)}</div>` : ''}
               <div class="card-actions">
+                <button type="button" class="btn sm primary" data-open-chat-rt="claude" data-open-chat-id="${esc(s.id)}" data-open-chat-cwd="${esc(s.cwd || '')}" data-open-chat-name="${esc(s.name || '')}">Chat Live</button>
                 <button type="button" class="btn sm" data-copy="${esc(s.id)}">Copy UUID</button>
                 ${s.cwd ? `<button type="button" class="btn sm" data-diff="${esc(s.cwd)}">View Diff</button>` : ''}
-                <button type="button" class="btn sm primary" data-msg-claude="${esc(s.name || s.id.slice(0, 8))}">Message on Board</button>
+                <button type="button" class="btn sm" data-msg-claude="${esc(s.name || s.id.slice(0, 8))}">Board</button>
               </div>
             </article>`;
         })
@@ -478,6 +507,18 @@ function renderClaude(snap) {
     : '';
 
   list.innerHTML = slotsHtml + sessionsHtml;
+
+  list.querySelectorAll('[data-open-chat-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openLiveTarget({
+        runtime: btn.dataset.openChatRt,
+        threadId: btn.dataset.openChatId,
+        cwd: btn.dataset.openChatCwd,
+        name: btn.dataset.openChatName,
+        out: btn.dataset.openChatOut || '',
+      });
+    });
+  });
 
   list.querySelectorAll('[data-copy]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -558,11 +599,24 @@ function renderRuns(snap) {
           ${r.preview ? `<div class="body-text">${esc(r.preview)}</div>` : ''}
           <div class="meta">${esc(r.out)}</div>
           <div class="card-actions">
+            <button type="button" class="btn sm primary" data-watch-run="${esc(r.out)}" data-watch-rt="${esc(r.runtime || 'codex')}" data-watch-id="${esc(r.threadId || '')}" data-watch-cwd="${esc(r.cwd || '')}" data-watch-name="${esc(r.name || '')}">Open Live View</button>
             <button type="button" class="btn sm" data-inspect="${esc(r.out)}">Inspect summary.json</button>
           </div>
         </article>`;
     })
     .join('');
+
+  list.querySelectorAll('[data-watch-run]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openLiveTarget({
+        out: btn.dataset.watchRun,
+        runtime: btn.dataset.watchRt,
+        threadId: btn.dataset.watchId,
+        cwd: btn.dataset.watchCwd,
+        name: btn.dataset.watchName,
+      });
+    });
+  });
 
   list.querySelectorAll('[data-inspect]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -636,6 +690,7 @@ async function refresh(force = false) {
     $('empty-config').classList.add('hidden');
     $('content').classList.remove('hidden');
     setStatus(snap.online ? 'ok' : 'err', snap.online ? `Live · ${snap.host}` : 'Offline');
+    renderLiveRunsDropdown(snap);
     renderBoard(snap);
     renderSessions(snap);
     renderClaude(snap);
@@ -652,6 +707,9 @@ document.querySelectorAll('.tab').forEach((btn) => {
 
 $('host-select').addEventListener('change', (e) => {
   state.host = e.target.value;
+  stopLivePoll();
+  state.live.out = '';
+  state.live.threadId = '';
   refresh(true);
 });
 
@@ -735,3 +793,334 @@ $('board-form').addEventListener('submit', async (e) => {
 
 refresh(true);
 state.pollTimer = setInterval(() => refresh(false), 6000);
+
+// ---------------------------------------------------------------------------
+// Live Stream Viewer (Claude & Codex real-time output inside Antigravity)
+// ---------------------------------------------------------------------------
+
+function stopLivePoll() {
+  if (state.live.timer) {
+    clearInterval(state.live.timer);
+    state.live.timer = null;
+  }
+}
+
+function renderLiveRunsDropdown(snap) {
+  const runs = snap.runs || [];
+  const runningCount = runs.filter((r) => r.status === 'running').length;
+  $('count-live').textContent = runningCount ? `${runningCount}` : '';
+
+  const sel = $('live-run-select');
+  const prev = state.live.out || sel.value;
+  sel.innerHTML =
+    '<option value="">Select a Codex or Claude run…</option>' +
+    runs
+      .map((r) => {
+        const dot = r.status === 'running' ? '● ' : '';
+        const label = `${dot}[${r.runtime || 'codex'}] ${r.name || (r.threadId || '').slice(0, 10) || 'run'} (${r.status || '?'})`;
+        return `<option value="${esc(r.out)}">${esc(label)}</option>`;
+      })
+      .join('');
+  if (prev && runs.some((r) => r.out === prev)) {
+    sel.value = prev;
+  } else if (!state.live.out && !state.live.threadId && runs.length) {
+    // Auto-select the latest run on first open so Live tab is immediately useful!
+    const top = runs[0];
+    sel.value = top.out;
+    openLiveTarget({
+      out: top.out,
+      runtime: top.runtime || 'codex',
+      threadId: top.threadId || '',
+      cwd: top.cwd || '',
+      name: top.name || '',
+      switchToTab: false,
+    });
+  }
+}
+
+function consumeStreamEvents(events) {
+  const L = state.live;
+  for (const ev of events || []) {
+    // --- Codex app-server events ---
+    if (ev.method === 'item/agentMessage/delta') {
+      const delta = ev.params?.delta || '';
+      if (delta) L.streamText += delta;
+    } else if (ev.method === 'item/completed') {
+      const item = ev.params?.item || {};
+      if (item.type === 'commandExecution') {
+        L.tools.push({
+          title: `Bash · ${item.command || ''} [exit=${item.exitCode ?? '?'}]`,
+          body: (item.aggregatedOutput || '').slice(-3000),
+        });
+      } else if (item.type === 'fileChange') {
+        const files = (item.changes || []).map((c) => `${c.kind || 'edit'} ${c.path || ''}`).join('\n');
+        L.tools.push({ title: `FileChange (${(item.changes || []).length} files)`, body: files });
+      } else if (item.type === 'agentMessage' && item.text && !L.streamText) {
+        L.streamText = item.text;
+      }
+    }
+    // --- Claude CLI stream-json events ---
+    else if (ev.type === 'stream_event') {
+      const inner = ev.event || {};
+      if (inner.type === 'content_block_delta') {
+        const d = inner.delta || {};
+        if (d.type === 'text_delta' && d.text) {
+          L.streamText += d.text;
+        }
+      }
+    } else if (ev.type === 'assistant') {
+      const blocks = ev.message?.content || [];
+      for (const b of blocks) {
+        if (!b || typeof b !== 'object') continue;
+        if (b.type === 'tool_use') {
+          const inp = b.input ? JSON.stringify(b.input, null, 2) : '';
+          const preview = b.input?.command || b.input?.file_path || b.input?.pattern || '';
+          L.tools.push({
+            title: `Tool · ${b.name || 'tool'}${preview ? ' · ' + String(preview).slice(0, 60) : ''}`,
+            body: inp.slice(0, 3000),
+          });
+        } else if (b.type === 'text' && b.text && !L.streamText) {
+          L.streamText = b.text;
+        }
+      }
+    } else if (ev.type === 'result') {
+      if (typeof ev.result === 'string' && ev.result && !L.streamText) {
+        L.streamText = ev.result;
+      }
+    }
+  }
+}
+
+function renderLiveView() {
+  const L = state.live;
+  const badge = $('live-badge');
+  badge.textContent = L.status || 'idle';
+  badge.className = 'pill ' + (L.status === 'running' ? 'active' : L.status === 'failed' || L.status === 'timeout' ? 'failed' : '');
+
+  const metaParts = [];
+  if (L.runtime) metaParts.push(L.runtime);
+  if (state.host) metaParts.push(`host:${state.host}`);
+  if (L.name) metaParts.push(L.name);
+  if (L.threadId) metaParts.push(L.threadId.slice(0, 12));
+  $('live-meta').textContent = metaParts.join(' · ');
+
+  $('live-target-label').textContent = L.threadId
+    ? `Target: ${L.runtime || 'codex'} · ${L.name || L.threadId.slice(0, 12)}`
+    : L.cwd
+      ? `New ${L.runtime || 'codex'} @ ${L.cwd}`
+      : 'Select a session in Codex / Claude tab to chat directly';
+
+  $('live-btn-diff').classList.toggle('hidden', !L.cwd);
+  $('live-btn-relay').classList.toggle('hidden', !L.streamText && !L.summary?.finalMessage);
+  $('live-btn-interrupt').classList.toggle('hidden', !(L.runtime === 'codex' && L.status === 'running' && L.threadId && L.turnId));
+  $('live-send-btn').textContent = L.runtime === 'codex' && L.status === 'running' ? 'Steer' : 'Send';
+
+  const feed = $('live-feed');
+  if (!L.out && !L.prompt && !L.streamText) {
+    feed.innerHTML = `<div class="empty">${
+      L.threadId
+        ? `Ready to chat with <strong>${esc(L.runtime)}</strong> (${esc(L.name || L.threadId.slice(0, 12))}). Type a message below to run and stream live here.`
+        : 'Pick any run above, or click <strong>Chat / Watch</strong> on a Codex or Claude session to stream its real-time output right here.'
+    }</div>`;
+    return;
+  }
+
+  const pieces = [];
+  if (L.prompt) {
+    pieces.push(`<div class="bubble-prompt"><div class="meta" style="margin-bottom:4px;">Prompt</div>${esc(L.prompt)}</div>`);
+  }
+  for (const t of L.tools) {
+    pieces.push(
+      `<details class="tool-item"><summary>${esc(t.title)}</summary>${t.body ? `<pre>${esc(t.body)}</pre>` : ''}</details>`,
+    );
+  }
+  const textOut = L.streamText || L.summary?.finalMessage || (L.status === 'running' ? 'Thinking / streaming…' : '');
+  if (textOut) {
+    pieces.push(`<div class="bubble-assistant"><div class="meta" style="margin-bottom:4px;">${esc(L.runtime || 'agent')} · ${esc(L.status)}</div>${esc(textOut)}</div>`);
+  }
+  if (L.summary?.error) {
+    pieces.push(`<div class="alert" style="margin:0;">${esc(L.summary.error)}</div>`);
+  }
+  if (L.summary && L.status !== 'running') {
+    const dur = L.summary.durationMs ? `${(L.summary.durationMs / 1000).toFixed(1)}s` : '';
+    pieces.push(`<div class="meta">Finished (${esc(L.status)}) ${dur} · ${esc(L.out)}</div>`);
+  }
+
+  const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+  feed.innerHTML = pieces.join('');
+  if (nearBottom) feed.scrollTop = feed.scrollHeight;
+}
+
+async function pollLiveOnce() {
+  const L = state.live;
+  if (!L.out) return;
+  const res = await apiFetch(
+    `/api/stream?host=${encodeURIComponent(state.host)}&out=${encodeURIComponent(L.out)}&offset=${L.offset}`,
+  );
+  const json = await res.json();
+  if (!json.ok) {
+    showToast(`Stream error: ${json.error}`);
+    stopLivePoll();
+    return;
+  }
+  L.offset = json.offset ?? L.offset;
+  L.status = json.status || L.status;
+  if (json.prompt) L.prompt = json.prompt;
+  if (json.turn) {
+    L.runtime = json.turn.runtime || L.runtime;
+    L.threadId = json.turn.threadId || L.threadId;
+    L.turnId = json.turn.turnId || L.turnId;
+    L.cwd = json.turn.cwd || L.cwd;
+    L.name = json.turn.name || L.name;
+  }
+  if (json.summary) {
+    L.summary = json.summary;
+    if (!L.streamText && json.summary.finalMessage) L.streamText = json.summary.finalMessage;
+  }
+  consumeStreamEvents(json.events || []);
+  renderLiveView();
+
+  if (L.status && L.status !== 'running' && L.status !== 'starting' && !json.hasMore) {
+    stopLivePoll();
+    refresh(true);
+  }
+}
+
+function openLiveTarget({ out = '', runtime = 'codex', threadId = '', cwd = '', name = '', switchToTab = true }) {
+  stopLivePoll();
+  Object.assign(state.live, {
+    out,
+    offset: 0,
+    runtime,
+    threadId,
+    turnId: '',
+    cwd,
+    name,
+    status: out ? 'loading' : 'ready',
+    prompt: '',
+    streamText: '',
+    tools: [],
+    summary: null,
+  });
+  if (out) $('live-run-select').value = out;
+  if (switchToTab) switchTab('live');
+  renderLiveView();
+  if (out) {
+    pollLiveOnce();
+    state.live.timer = setInterval(pollLiveOnce, 1200);
+  } else {
+    $('live-input').focus();
+  }
+}
+
+$('live-run-select').addEventListener('change', (e) => {
+  const out = e.target.value;
+  if (!out) return;
+  const r = (state.snapshot?.runs || []).find((x) => x.out === out) || {};
+  openLiveTarget({
+    out,
+    runtime: r.runtime || 'codex',
+    threadId: r.threadId || '',
+    cwd: r.cwd || '',
+    name: r.name || '',
+  });
+});
+
+$('live-btn-diff').addEventListener('click', () => {
+  if (!state.live.cwd) return;
+  $('diff-cwd').value = state.live.cwd;
+  switchTab('evidence');
+  loadGitDiff();
+});
+
+$('live-btn-relay').addEventListener('click', async () => {
+  const text = state.live.streamText || state.live.summary?.finalMessage || '';
+  if (!text || !window.sidecar?.agent) return;
+  try {
+    await window.sidecar.agent.sendMessage(
+      `[Hive Bridge Live | host=${state.host} | ${state.live.runtime} ${state.live.name || state.live.threadId}]\n${text}`,
+    );
+    showToast('Relayed stream output to Antigravity chat');
+  } catch (e) {
+    showToast(`Relay failed: ${e.message}`);
+  }
+});
+
+$('live-btn-interrupt').addEventListener('click', async () => {
+  const L = state.live;
+  if (!L.threadId || !L.turnId) return;
+  const res = await apiFetch('/api/codex/interrupt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: state.host, threadId: L.threadId, turnId: L.turnId }),
+  });
+  const json = await res.json();
+  showToast(json.ok ? 'Interrupt sent' : `Interrupt failed: ${json.error}`);
+});
+
+$('live-composer').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const text = $('live-input').value.trim();
+  if (!text) return;
+  const L = state.live;
+  if (!L.threadId && !L.cwd) {
+    showToast('Select a Codex or Claude session first');
+    return;
+  }
+
+  // If Codex is mid-turn, steer it instead of starting a new turn!
+  if (L.runtime === 'codex' && L.status === 'running' && L.threadId && L.turnId) {
+    const res = await apiFetch('/api/codex/steer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: state.host, threadId: L.threadId, turnId: L.turnId, text }),
+    });
+    const json = await res.json();
+    if (json.ok) {
+      $('live-input').value = '';
+      showToast('Steered running Codex turn');
+    } else {
+      showToast(`Steer failed: ${json.error}`);
+    }
+    return;
+  }
+
+  const sendBtn = $('live-send-btn');
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Starting…';
+  try {
+    const res = await apiFetch('/api/chat/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: state.host,
+        runtime: L.runtime || 'codex',
+        threadId: L.threadId,
+        cwd: L.cwd,
+        name: L.name,
+        text,
+      }),
+    });
+    const json = await res.json();
+    if (!json.ok) {
+      showToast(`Send failed: ${json.error}`);
+      return;
+    }
+    $('live-input').value = '';
+    if (json.out) {
+      openLiveTarget({
+        out: json.out,
+        runtime: json.runtime || L.runtime,
+        threadId: json.threadId || L.threadId,
+        cwd: L.cwd,
+        name: L.name,
+      });
+    } else {
+      showToast(json.note || 'Turn started');
+      refresh(true);
+    }
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.textContent = L.runtime === 'codex' && L.status === 'running' ? 'Steer' : 'Send';
+  }
+});

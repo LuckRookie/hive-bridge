@@ -708,6 +708,8 @@ def cmd_evidence(args):
         sys.exit(f"run directory not found: {out_path}")
     turn = _load_json_safe(out_path / "turn.json")
     summary = _load_json_safe(out_path / "summary.json")
+    prompt_file = out_path / "prompt.txt"
+    prompt_text = prompt_file.read_text(encoding="utf-8", errors="replace") if prompt_file.exists() else ""
     events_tail = []
     ev_file = out_path / "events.jsonl"
     if ev_file.exists():
@@ -720,9 +722,60 @@ def cmd_evidence(args):
     emit(
         {
             "out": str(out_path),
+            "prompt": prompt_text,
             "turn": turn,
             "summary": summary,
             "eventsTail": events_tail,
+        }
+    )
+
+
+def cmd_stream(args):
+    """Incrementally read newly appended JSONL lines from <out>/events.jsonl by byte offset."""
+    out_path = Path(args.out).expanduser().resolve()
+    if not out_path.exists():
+        sys.exit(f"run directory not found: {out_path}")
+    turn = _load_json_safe(out_path / "turn.json")
+    summary = _load_json_safe(out_path / "summary.json")
+    prompt_file = out_path / "prompt.txt"
+    prompt_text = prompt_file.read_text(encoding="utf-8", errors="replace") if prompt_file.exists() else ""
+
+    ev_file = out_path / "events.jsonl"
+    offset = max(0, int(args.offset))
+    new_offset = offset
+    file_size = 0
+    events = []
+    if ev_file.exists():
+        file_size = ev_file.stat().st_size
+        if offset < file_size:
+            with open(ev_file, "rb") as f:
+                f.seek(offset)
+                chunk = f.read(args.max_bytes)
+            last_nl = chunk.rfind(b"\n")
+            if last_nl != -1:
+                complete = chunk[: last_nl + 1]
+                new_offset = offset + len(complete)
+                for raw in complete.decode("utf-8", errors="replace").splitlines():
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        events.append(json.loads(raw))
+                    except Exception:
+                        pass
+
+    status = (summary or {}).get("status") or ("running" if turn else "starting")
+    emit(
+        {
+            "out": str(out_path),
+            "status": status,
+            "offset": new_offset,
+            "size": file_size,
+            "hasMore": new_offset < file_size,
+            "prompt": prompt_text if offset == 0 else None,
+            "turn": turn,
+            "summary": summary,
+            "events": events,
         }
     )
 
@@ -870,6 +923,11 @@ def main():
     p = sub.add_parser("evidence")
     p.add_argument("--out", required=True)
     p.add_argument("--tail", type=int, default=30)
+
+    p = sub.add_parser("stream", help="Incrementally stream events.jsonl by byte offset")
+    p.add_argument("--out", required=True)
+    p.add_argument("--offset", type=int, default=0)
+    p.add_argument("--max-bytes", type=int, default=131072)
 
     p = sub.add_parser("git-diff")
     p.add_argument("--cwd", required=True)

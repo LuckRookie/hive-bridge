@@ -30,7 +30,10 @@
       </div>
 
       <nav class="tabs" role="tablist">
-        <button type="button" class="tab active" data-tab="board" role="tab" aria-selected="true">
+        <button type="button" class="tab active" data-tab="live" role="tab" aria-selected="true">
+          Live <span id="count-live" class="badge"></span>
+        </button>
+        <button type="button" class="tab" data-tab="board" role="tab" aria-selected="false">
           Board <span id="count-board" class="badge"></span>
         </button>
         <button type="button" class="tab" data-tab="sessions" role="tab" aria-selected="false">
@@ -51,8 +54,38 @@
     </div>
 
     <main id="content" class="main">
+      <!-- Tab 0: Live Stream Viewer (Claude & Codex real-time output inside Antigravity!) -->
+      <section id="panel-live" class="panel active">
+        <div class="toolbar">
+          <select id="live-run-select" class="select sm grow" aria-label="Select run stream">
+            <option value="">Select a Codex or Claude run…</option>
+          </select>
+          <span id="live-badge" class="pill">idle</span>
+        </div>
+        <div id="live-meta" class="meta" style="padding:0 14px 6px;"></div>
+        <div id="live-feed" class="list">
+          <div class="empty">
+            Pick any run above, or click <strong>Chat / Watch</strong> on a Codex or Claude session to stream its real-time output right here.
+          </div>
+        </div>
+        <form id="live-composer" class="composer">
+          <div id="live-target-bar" class="composer-row" style="align-items:center; justify-content:space-between;">
+            <span id="live-target-label" class="meta">No target session selected</span>
+            <div style="display:flex; gap:6px;">
+              <button id="live-btn-diff" type="button" class="btn sm hidden">Git Diff</button>
+              <button id="live-btn-relay" type="button" class="btn sm hidden">Relay to Chat</button>
+              <button id="live-btn-interrupt" type="button" class="btn sm danger hidden">Interrupt</button>
+            </div>
+          </div>
+          <div class="composer-row">
+            <textarea id="live-input" class="textarea" rows="2" placeholder="Send a follow-up message (or steer a running Codex turn)…"></textarea>
+            <button id="live-send-btn" type="submit" class="btn primary">Send</button>
+          </div>
+        </form>
+      </section>
+
       <!-- Tab 1: Shared Blackboard -->
-      <section id="panel-board" class="panel active">
+      <section id="panel-board" class="panel">
         <div class="toolbar">
           <select id="filter-topic" class="select sm"><option value="">All topics</option></select>
           <select id="filter-to" class="select sm">
