@@ -21,27 +21,28 @@ When working with remote sessions or the shared board, surface the native side-p
 
 `[Hive Bridge](sidecar://hive-bridge/console/)`
 
-## Operating Model — Owner-Created Sessions & Live Desktop Visibility (READ FIRST!)
+## Operating Model & Known Constraints (READ FIRST!)
 
-Different runtimes have different Desktop visibility mechanics. **Always follow this exact model so the Owner can watch every agent work live in their Desktop apps and never suffers session sprawl:**
+Different runtimes have different Desktop visibility and control mechanics. **Follow this verified matrix so you always pick the right channel:**
 
-| Target Agent | How It Connects | Live-Visible in Owner's Desktop App? | Default Dispatch Method |
+| Target Agent | Transport & Control | Visible Live Where? | Key Constraint / Prerequisite |
 | :--- | :--- | :--- | :--- |
-| **Remote Codex** (e.g. Linux server) | Shared `codex app-server` Unix socket (`threadSource: user`) | **YES — 100% live**, whether created by Owner or by `hive-bridge` | Bind Owner's existing UUID to a slot (`bus slot-set`) OR use `hive-bridge run --runtime codex --cwd <dir> --role <role>` |
-| **Remote Claude Desktop Remote** (Owner's primary Claude workflow!) | Owner pre-opens a Remote session in Claude Desktop and puts it on standby (`hive-relay-bus wait --for <seat>`) | **YES — 100% live** inside the Owner's open Claude Desktop window! | **Post to the shared board**: `hive-bridge bus post --from antigravity --to <seat> ...`, then wait for reply via `hive-bridge bus wait --for antigravity` |
-| **Local Claude / Local Codex Desktop** | Private per-app processes (external CLI runs do NOT appear in Desktop sidebar) | **Only if Owner pre-opened the window** and seated it on the board | Do NOT spawn external headless local CLI expecting it to appear in Desktop; coordinate only with Owner's pre-opened seated windows |
-| **Remote Headless Claude CLI** | Independent `claude -p --resume` subprocess (requires remote `claude /login`) | **NO** (disk-only `.jsonl`, not shown in Claude Desktop Remote sidebar) | **ONLY use `hive-bridge run --runtime claude` when the Owner explicitly asks for unattended headless CLI** |
+| **Remote Linux Codex** | Shared `codex app-server` Unix socket (`threadSource: user`) | **Codex Desktop + Hive Bridge `Live` panel** | Best full-control target (`run`/`send`/`steer`/`interrupt`/`rotate`/`gc`). |
+| **Local macOS Codex** | Bundled `ChatGPT.app` `codex` (stdio `app-server`) or `codex queue` | `app-server` → **Hive Bridge `Live` panel**; `codex queue` → **open Codex Desktop window** | macOS Desktop uses a private stdio `app-server` (no shared Unix socket), so external `app-server` runs do not live-sync into Desktop sidebar; `codex queue --thread <uuid>` delivers to an already-open, idle Desktop window. |
+| **Remote / Local Claude Code CLI** (`--runtime claude`) | `claude -p --output-format stream-json --include-partial-messages --resume` | **Hive Bridge `Live` panel (real-time token stream)** | **Requires `claude` CLI auth on that host** (`/login` or API env vars). Shares `~/.claude/projects/*.jsonl` with Claude Desktop, but Claude Desktop only shows appended turns after restarting/reopening. |
+| **Remote Claude Desktop Remote** (unauthenticated remote CLI) | Shared SQLite blackboard (`bus post`/`inbox`/`wait`) | **Claude Desktop Remote window** | External scripts **cannot** inject directly into an open Claude Desktop Remote `ccd-cli` process (Desktop owns its stdio pipe and auth). Either authenticate remote `claude` CLI and watch in Hive Bridge's `Live` panel, or exchange tasks via the shared blackboard. |
 
 ### Golden Rules
 
-1. **Prefer Owner-created sessions over creating new ones.**
-   - Before spawning a new Codex session, check `hive-bridge slots` and `hive-bridge codex list --cwd <dir>`. If the Owner already created a session for that project (or gave you its UUID), bind it once via `hive-bridge bus slot-set --cwd <dir> --runtime codex --role <role> --thread <uuid>` and reuse it!
-   - For **Claude Desktop Remote**, check `hive-bridge bus workers` and `hive-bridge claude list` first. Dispatch by posting to the worker's seat name (e.g., `--to claude` or `--to claude-ui`), **never** by calling `hive-bridge claude new` unless the Owner explicitly requested headless CLI.
-2. **Prevent session sprawl.** Use `hive-bridge run` (reuses pinned slots), `--ephemeral` for one-off Codex runs, `hive-bridge rotate` to refresh heavy slots cleanly, and `hive-bridge gc` to sweep retired/ephemeral sessions.
-3. **Permissions are host-profile driven.** Pass through the Owner's configured defaults in `~/.config/hive-bridge/config.json` (default: full access for automated slots). Existing sessions keep their own permissions.
-4. **Ask the Owner before choosing or changing Codex model / reasoning effort.** Never guess when creating a new Codex session or changing an existing one's `--model` / `--effort`.
-5. **Never blindly trust self-reports.** Always verify `summary.json` (`status`, `commands` exit codes) and remote `git diff` before reporting completion.
-6. **No polling loops.** Run long `hive-bridge run`, `rotate`, or `bus wait` calls as background commands (`WaitMsBeforeAsync: 500`) and wait for the completion notification.
+1. **Prefer pinned slots and Owner-created sessions over creating stray threads.**
+   - Check `hive-bridge slots` and `hive-bridge codex list --cwd <dir>` (or `claude list`) first. Bind existing UUIDs with `hive-bridge bus slot-set` so `hive-bridge run` reuses them instead of causing session sprawl.
+   - For remote Claude: check whether remote `claude` CLI is authenticated before dispatching `hive-bridge run --runtime claude`; if it returns `Not logged in`, tell the Owner clearly (they can run `claude` → `/login` or configure API env vars on the remote host, or collaborate via `bus post` with an open Desktop Remote window).
+2. **Prevent session sprawl.** Use `hive-bridge run` (reuses pinned slots), `--ephemeral` for one-off runs, `hive-bridge rotate` to refresh heavy slots cleanly, and `hive-bridge gc` to sweep retired/ephemeral sessions.
+3. **Watch live in the Side-Pane Console.** Any run started via `hive-bridge run` / `codex` / `claude` streams incrementally to the `Live` tab (`bus stream --out <dir> --offset <N>`). Surface `[Hive Bridge](sidecar://hive-bridge/console/)` when helpful.
+4. **Permissions are host-profile driven.** Pass through the Owner's configured defaults in `~/.config/hive-bridge/config.json` (default: full access for automated slots). Existing sessions keep their own permissions.
+5. **Ask the Owner before choosing or changing Codex model / reasoning effort.** Never guess when creating a new Codex session or changing an existing one's `--model` / `--effort`.
+6. **Never blindly trust self-reports.** Always verify `summary.json` (`status`, `commands` exit codes) and `git diff` before reporting completion.
+7. **No polling loops.** Run long `hive-bridge run`, `rotate`, or `bus wait` calls as background commands (`WaitMsBeforeAsync: 500`) and wait for the completion notification.
 
 ## Quick Command Reference
 
