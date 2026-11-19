@@ -106,10 +106,12 @@ async function fetchSnapshot(host, cwd) {
   const codexArgs = ['codex', ...hostArgs, 'list', '--limit', '30'];
   if (cwd) codexArgs.push('--cwd', cwd);
 
-  const [codexRes, busRes, runsRes] = await Promise.all([
+  const [codexRes, busRes, runsRes, slotsRes, metaRes] = await Promise.all([
     runBridge(codexArgs, { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'recent', '--limit', '60'], { timeout: 12000 }),
     runBridge(['bus', ...hostArgs, 'runs', '--limit', '20'], { timeout: 12000 }),
+    runBridge(['bus', ...hostArgs, 'slot-list'], { timeout: 12000 }),
+    runBridge(['bus', ...hostArgs, 'meta-list'], { timeout: 12000 }),
   ]);
 
   const errors = {};
@@ -118,6 +120,17 @@ async function fetchSnapshot(host, cwd) {
   if (!runsRes.ok) errors.runs = (runsRes.stderr || runsRes.stdout).trim();
 
   const runs = runsRes.ok ? parseJsonLines(runsRes.stdout) : [];
+  const slots = slotsRes.ok ? parseJsonLines(slotsRes.stdout) : [];
+  const metas = metaRes.ok ? parseJsonLines(metaRes.stdout) : [];
+  const metaByThread = {};
+  for (const m of metas) {
+    if (m.runtime === 'codex' && m.threadId) metaByThread[m.threadId] = m;
+  }
+  const slotByThread = {};
+  for (const sl of slots) {
+    if (sl.runtime === 'codex' && sl.threadId) slotByThread[sl.threadId] = sl;
+  }
+
   // Map active threadId -> latest running turnId from runs index so Sessions tab can steer/interrupt
   const activeTurns = {};
   for (const r of runs) {
@@ -129,6 +142,8 @@ async function fetchSnapshot(host, cwd) {
   const sessions = (codexRes.ok ? parseJsonLines(codexRes.stdout) : []).map((s) => ({
     ...s,
     activeTurn: activeTurns[s.id] || null,
+    slot: slotByThread[s.id] || null,
+    lifecycle: metaByThread[s.id]?.kind || (slotByThread[s.id] ? 'slot' : ''),
   }));
 
   return {
@@ -139,6 +154,7 @@ async function fetchSnapshot(host, cwd) {
     online: codexRes.ok || busRes.ok,
     codexOnline: codexRes.ok,
     busOnline: busRes.ok,
+    slots,
     sessions,
     messages: busRes.ok ? parseJsonLines(busRes.stdout) : [],
     runs,
@@ -306,6 +322,42 @@ app.api(
     snapshotCache.clear();
     if (!res.ok) return { ok: false, error: (res.stderr || res.stdout).trim() };
     return { ok: true, result: parseJsonSingle(res.stdout) };
+  },
+  'POST',
+);
+
+app.api(
+  '/api/slot/rotate',
+  async (data) => {
+    const { host, runtime = 'codex', cwd, role, deleteOld, note } = data;
+    if (!cwd || !role) return { ok: false, error: 'cwd and role are required' };
+    const args = ['rotate'];
+    if (host) args.push('--host', host);
+    args.push('--runtime', String(runtime), '--cwd', String(cwd), '--role', String(role));
+    if (deleteOld) args.push('--delete-old');
+    if (note) args.push('--note', String(note));
+    const res = await runBridge(args, { timeout: 180000 });
+    snapshotCache.clear();
+    if (!res.ok) return { ok: false, error: (res.stderr || res.stdout).trim() };
+    const lines = parseJsonLines(res.stdout);
+    return { ok: true, result: lines[lines.length - 1] || null };
+  },
+  'POST',
+);
+
+app.api(
+  '/api/gc',
+  async (data) => {
+    const args = ['gc'];
+    if (data.host) args.push('--host', data.host);
+    if (data.days) args.push('--days', String(data.days));
+    if (data.includeStale) args.push('--include-stale');
+    if (data.forceEphemeral) args.push('--force-ephemeral');
+    if (data.apply) args.push('--apply');
+    const res = await runBridge(args, { timeout: 30000 });
+    if (data.apply) snapshotCache.clear();
+    if (!res.ok) return { ok: false, error: (res.stderr || res.stdout).trim() };
+    return { ok: true, ...(parseJsonSingle(res.stdout) || {}) };
   },
   'POST',
 );

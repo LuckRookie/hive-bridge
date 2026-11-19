@@ -1,11 +1,12 @@
 # Hive Bridge
 
-**Zero-daemon, three-way bridge connecting local [Google Antigravity](https://antigravity.google) with remote SSH servers running OpenAI Codex (live Desktop-visible) and Claude (Desktop Remote or CLI).**
+**Zero-daemon, three-way bridge connecting local AI orchestrators ([Google Antigravity](https://antigravity.google), local Claude Code, or local Codex) with remote SSH servers running OpenAI Codex (live Desktop-visible) and Claude (Desktop Remote or CLI).**
 
 - **No remote HTTP daemons, no fragile SSH port forwarding, no MCP disconnects after laptop sleep.** Everything rides over multiplexed OpenSSH (`ControlMaster`) and a stateless SQLite blackboard (`WAL` mode).
 - **Codex Desktop stays 100% live-visible.** Connects directly to Codex's shared `app-server` Unix domain socket (`/tmp/codex-daemon-<uid>/*`) with `threadSource: "user"`.
-- **Native Antigravity Side-Pane Console.** Includes a built-in Antigravity Sidecar UI (`Board` / `Codex` / `Evidence & Git Diff`) that lives right next to your chat, with one-click mid-turn **Steer**, **Interrupt**, and **Relay to Chat**.
-- **Unified Three-Way Adapters.** One installer wires up Antigravity (local plugin), Claude (remote `~/.claude/skills/hive-bridge`), and Codex (remote `~/.codex/skills/hive-bridge`).
+- **Anti-Sprawl Session Governance (`run` / `slots` / `rotate` / `gc`).** Bind one persistent slot per `(project, runtime, role)`, rotate cleanly with an automatic handoff packet when context gets heavy, and garbage-collect rotated or ephemeral sessions without touching pinned slots.
+- **Host-Configured Permission Pass-Through.** Configure your preferred sandbox/permission defaults once per host in `~/.config/hive-bridge/config.json` (defaults to full access for automated slots; fully editable per host).
+- **Native Antigravity Side-Pane Console.** Built-in Sidecar UI (`Board` / `Codex & Slots` / `Evidence & Git Diff`) with one-click **Rotate**, **GC Preview/Clean**, mid-turn **Steer**, **Interrupt**, and **Relay to Chat**.
 - **🐝 Easter Egg — Swarm Guest Bee.** Invite a remote Codex or Claude session straight into an Antigravity native **Swarm** as a proxy worker so other Swarm bees can `@mention` it directly.
 
 ---
@@ -13,15 +14,17 @@
 ## Architecture
 
 ```text
-Local Machine (Antigravity)                    Remote SSH Server (any host)
+Local Machine (Antigravity / Claude Code)      Remote SSH Server (any host)
 ┌──────────────────────────────────┐           ┌──────────────────────────────────────┐
 │ Antigravity Plugin (hive-bridge) │           │ ~/.local/bin/hive-relay-bus (SQLite) │
-│  • SKILL.md + Swarm Guest Bee    │  OpenSSH  │   └─ Shared Board / Inbox / Evidence │
-│  • Sidecar Console (Aux Pane)    │◄─────────►│                                      │
-│  • ~/.local/bin/hive-bridge      │ Control-  │ ~/.local/bin/hive-codex-daemon       │
-│  • ~/.config/hive-bridge/        │  Master   │   └─ /tmp/codex-daemon-<uid>/*       │
-│      config.json (host profiles) │           │      (live in Codex Desktop!)        │
+│  • SKILL.md + Swarm Guest Bee    │  OpenSSH  │   ├─ Shared Board / Inbox / Evidence │
+│  • Sidecar Console (Aux Pane)    │◄─────────►│   └─ Pinned Slots & Lifecycle Meta   │
+│  • ~/.local/bin/hive-bridge      │ Control-  │                                      │
+│  • ~/.config/hive-bridge/        │  Master   │ ~/.local/bin/hive-codex-daemon       │
+│      config.json (host profiles) │           │   └─ /tmp/codex-daemon-<uid>/*       │
+│  • Auto-links local Claude/Codex │           │      (live in Codex Desktop!)        │
 └──────────────────────────────────┘           │                                      │
+                                               │ ~/.local/bin/hive-claude-runner      │
                                                │ Remote Skills:                       │
                                                │  • ~/.claude/skills/hive-bridge      │
                                                │  • ~/.codex/skills/hive-bridge       │
@@ -34,7 +37,7 @@ Local Machine (Antigravity)                    Remote SSH Server (any host)
 git clone https://github.com/LuckRookie/hive-bridge.git
 cd hive-bridge
 
-# 1. Install locally (links CLI + Antigravity plugin & side-pane console)
+# 1. Install locally (links CLI + Antigravity plugin/console + detects local Claude/Codex)
 ./install.sh local
 
 # 2. Deploy to any passwordless SSH host (e.g. my-dev-server)
@@ -44,18 +47,44 @@ cd hive-bridge
 ./install.sh doctor my-dev-server
 ```
 
-Add more servers anytime by running `./install.sh remote <another-ssh-host>`. No hostnames or paths are hardcoded in the repository; all profiles live in `~/.config/hive-bridge/config.json`.
+All host profiles and permission defaults live locally in `~/.config/hive-bridge/config.json` (never committed to git):
 
-### Optional: Claude Code Inbox Hook (Remote)
-To get an automatic one-line unread blackboard reminder before every prompt in remote Claude Code / Claude Desktop Remote, add `~/.hive-bridge/claude_check_inbox.sh` to your remote Claude `UserPromptSubmit` hook configuration.
+```json
+{
+  "default_host": "my-dev-server",
+  "hosts": {
+    "my-dev-server": {
+      "ssh": "my-dev-server",
+      "codex_python": "/path/to/python3",
+      "default_cwd": "/home/user",
+      "codex_sandbox": "danger-full-access",
+      "codex_approval_policy": "never",
+      "claude_permission_mode": "bypassPermissions"
+    }
+  }
+}
+```
 
 ## Core Commands
 
 ```bash
-# Remote Codex (live in Codex Desktop)
+# Slot-based dispatch (reuses pinned session per cwd + runtime + role — prevents session sprawl!)
+hive-bridge slots
+hive-bridge run --runtime codex --cwd /path/to/repo --role coder --prompt-file prompt.md
+hive-bridge run --runtime claude --cwd /path/to/repo --role frontend --prompt-file ui.md
+
+# Ephemeral one-off session (tagged for GC, never touches pinned slots)
+hive-bridge run --runtime codex --cwd /path/to/repo --role review --ephemeral --prompt-file review.md
+
+# Clean rotation (builds handoff packet from latest summary + git status -> opens fresh slot -> retires old)
+hive-bridge rotate --runtime codex --cwd /path/to/repo --role coder --delete-old
+
+# Safe garbage collection (dry-run by default; never deletes pinned slots or active turns)
+hive-bridge gc
+hive-bridge gc --apply
+
+# Mid-turn steer & interrupt
 hive-bridge codex list --cwd /path/to/repo
-hive-bridge codex new --cwd /path/to/repo --name "api-refactor" --model <model> --effort <effort> --prompt-file prompt.md
-hive-bridge codex send --thread <uuid> --prompt-file followup.md
 hive-bridge codex steer --thread <uuid> --turn <turn-id> --text "Focus on tests first"
 hive-bridge codex interrupt --thread <uuid> --turn <turn-id>
 

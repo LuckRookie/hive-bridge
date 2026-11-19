@@ -83,13 +83,15 @@
         </form>
       </section>
 
-      <!-- Tab 2: Remote Codex Sessions -->
+      <!-- Tab 2: Remote Codex Sessions & Pinned Slots -->
       <section id="panel-sessions" class="panel">
         <div class="toolbar">
           <input id="filter-cwd" class="input sm grow" type="text" placeholder="Filter by remote project cwd…">
+          <button id="btn-gc" type="button" class="btn sm" title="Preview rotated/ephemeral sessions to clean">GC Preview</button>
           <button id="btn-doctor" type="button" class="btn sm">Doctor</button>
         </div>
         <pre id="doctor-out" class="code-box hidden"></pre>
+        <div id="gc-box" class="card hidden" style="margin:0 14px 8px;"></div>
         <div id="sessions-error" class="alert hidden"></div>
         <div id="sessions-list" class="list"></div>
       </section>

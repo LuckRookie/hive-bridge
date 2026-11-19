@@ -51,6 +51,18 @@ install_local() {
   ln -sfn "${REPO_DIR}/adapters/antigravity" "${AGY_PLUGIN_DIR}"
   info "Linked Antigravity plugin + side-pane console -> ${AGY_PLUGIN_DIR}"
 
+  # Also link local orchestrator skills for users who run Claude Code or Codex locally
+  if [ -d "${HOME}/.claude" ]; then
+    mkdir -p "${HOME}/.claude/skills"
+    ln -sfn "${REPO_DIR}/adapters/antigravity/skills/hive-bridge" "${HOME}/.claude/skills/hive-bridge-local"
+    info "Detected local ~/.claude -> linked local skill at ~/.claude/skills/hive-bridge-local"
+  fi
+  if [ -d "${HOME}/.codex" ]; then
+    mkdir -p "${HOME}/.codex/skills"
+    ln -sfn "${REPO_DIR}/adapters/antigravity/skills/hive-bridge" "${HOME}/.codex/skills/hive-bridge-local"
+    info "Detected local ~/.codex -> linked local skill at ~/.codex/skills/hive-bridge-local"
+  fi
+
   if [ ! -f "${LOCAL_CONFIG_FILE}" ]; then
     cat > "${LOCAL_CONFIG_FILE}" <<'EOF'
 {
@@ -154,6 +166,9 @@ cfg["hosts"][alias] = {
     "ssh": ssh_host,
     "codex_python": codex_py,
     "default_cwd": existing.get("default_cwd", remote_home),
+    "codex_sandbox": existing.get("codex_sandbox", "danger-full-access"),
+    "codex_approval_policy": existing.get("codex_approval_policy", "never"),
+    "claude_permission_mode": existing.get("claude_permission_mode", "bypassPermissions"),
 }
 if not cfg.get("default_host"):
     cfg["default_host"] = alias

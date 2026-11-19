@@ -1,7 +1,7 @@
 {
   "name": "hive-bridge",
   "displayName": "Hive Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-daemon bridge connecting local Antigravity with remote SSH Codex (live Desktop-visible), Claude sessions, a shared SQLite blackboard, a native side-pane console, and a Swarm Guest Bee integration.",
   "logo": "assets/logo.svg",
   "repository": "https://github.com/LuckRookie/hive-bridge",

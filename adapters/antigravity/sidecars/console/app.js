@@ -178,45 +178,113 @@ function renderSessions(snap) {
   }
 
   const sessions = snap.sessions || [];
+  const slots = snap.slots || [];
   $('count-sessions').textContent = sessions.length ? `${sessions.length}` : '';
 
   const q = ($('filter-cwd').value || '').trim().toLowerCase();
+  const filteredSlots = q
+    ? slots.filter((sl) => `${sl.role || ''} ${sl.cwd || ''} ${sl.threadId || ''}`.toLowerCase().includes(q))
+    : slots;
   const filtered = q
     ? sessions.filter((s) => `${s.name || ''} ${s.cwd || ''} ${s.id || ''}`.toLowerCase().includes(q))
     : sessions;
 
   const list = $('sessions-list');
-  if (!filtered.length) {
-    list.innerHTML = '<div class="empty">No Codex sessions found on this host.</div>';
+  if (!filteredSlots.length && !filtered.length) {
+    list.innerHTML = '<div class="empty">No pinned slots or Codex sessions found on this host.</div>';
     return;
   }
 
-  list.innerHTML = filtered
-    .map((s) => {
-      const statusType = typeof s.status === 'object' && s.status ? s.status.type : String(s.status || 'idle');
-      const isActive = statusType === 'active';
-      const turnId = s.activeTurn?.turnId || '';
-      return `
-        <article class="card">
-          <div class="card-head">
-            <strong>${esc(s.name || '(unnamed)')}</strong>
-            <span class="pill ${isActive ? 'active' : ''}">${esc(statusType)}</span>
-          </div>
-          <div class="meta">${esc(s.id)}</div>
-          ${s.cwd ? `<div class="meta">${esc(s.cwd)}</div>` : ''}
-          <div class="card-actions">
-            <button type="button" class="btn sm" data-copy="${esc(s.id)}">Copy UUID</button>
-            ${s.cwd ? `<button type="button" class="btn sm" data-diff="${esc(s.cwd)}">View Diff</button>` : ''}
-            ${isActive && turnId ? `<button type="button" class="btn sm danger" data-int-thread="${esc(s.id)}" data-int-turn="${esc(turnId)}">Interrupt</button>` : ''}
-          </div>
-          ${isActive && turnId ? `
-            <div class="steer-box">
-              <input type="text" class="input sm grow" data-steer-input="${esc(s.id)}" placeholder="Mid-turn steer instruction…">
-              <button type="button" class="btn sm primary" data-steer-thread="${esc(s.id)}" data-steer-turn="${esc(turnId)}">Steer</button>
-            </div>` : ''}
-        </article>`;
-    })
-    .join('');
+  const slotsHtml = filteredSlots.length
+    ? `<div class="meta" style="margin:2px 0;">Pinned Slots (${filteredSlots.length}) — reused automatically by <code>hive-bridge run</code></div>` +
+      filteredSlots
+        .map(
+          (sl) => `
+          <article class="card unread">
+            <div class="card-head">
+              <div>
+                <span class="pill active">slot</span>
+                <span class="pill">${esc(sl.runtime)}:${esc(sl.role)}</span>
+                <strong>${esc(sl.name || sl.role)}</strong>
+              </div>
+              <span class="meta">${sl.turns || 0} turns · ${fmtTime(sl.updatedAt)}</span>
+            </div>
+            <div class="meta">${esc(sl.threadId)}</div>
+            <div class="meta">${esc(sl.cwd)}</div>
+            <div class="card-actions">
+              <button type="button" class="btn sm" data-copy="${esc(sl.threadId)}">Copy UUID</button>
+              <button type="button" class="btn sm" data-diff="${esc(sl.cwd)}">View Diff</button>
+              <button type="button" class="btn sm" data-rotate-cwd="${esc(sl.cwd)}" data-rotate-role="${esc(sl.role)}" data-rotate-rt="${esc(sl.runtime)}">Rotate</button>
+            </div>
+          </article>`,
+        )
+        .join('')
+    : '';
+
+  const sessionsHtml = filtered.length
+    ? `<div class="meta" style="margin:6px 0 2px;">Codex Daemon Sessions (${filtered.length})</div>` +
+      filtered
+        .map((s) => {
+          const statusType = typeof s.status === 'object' && s.status ? s.status.type : String(s.status || 'idle');
+          const isActive = statusType === 'active';
+          const turnId = s.activeTurn?.turnId || '';
+          const lifeBadge = s.lifecycle
+            ? `<span class="pill ${s.lifecycle === 'slot' ? 'active' : 'warn'}">${esc(s.lifecycle)}</span>`
+            : '';
+          return `
+            <article class="card">
+              <div class="card-head">
+                <div>
+                  <strong>${esc(s.name || '(unnamed)')}</strong>
+                  ${lifeBadge}
+                </div>
+                <span class="pill ${isActive ? 'active' : ''}">${esc(statusType)}</span>
+              </div>
+              <div class="meta">${esc(s.id)}</div>
+              ${s.cwd ? `<div class="meta">${esc(s.cwd)}</div>` : ''}
+              <div class="card-actions">
+                <button type="button" class="btn sm" data-copy="${esc(s.id)}">Copy UUID</button>
+                ${s.cwd ? `<button type="button" class="btn sm" data-diff="${esc(s.cwd)}">View Diff</button>` : ''}
+                ${isActive && turnId ? `<button type="button" class="btn sm danger" data-int-thread="${esc(s.id)}" data-int-turn="${esc(turnId)}">Interrupt</button>` : ''}
+              </div>
+              ${isActive && turnId ? `
+                <div class="steer-box">
+                  <input type="text" class="input sm grow" data-steer-input="${esc(s.id)}" placeholder="Mid-turn steer instruction…">
+                  <button type="button" class="btn sm primary" data-steer-thread="${esc(s.id)}" data-steer-turn="${esc(turnId)}">Steer</button>
+                </div>` : ''}
+            </article>`;
+        })
+        .join('')
+    : '';
+
+  list.innerHTML = slotsHtml + sessionsHtml;
+
+  list.querySelectorAll('[data-rotate-role]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const cwd = btn.dataset.rotateCwd;
+      const role = btn.dataset.rotateRole;
+      const runtime = btn.dataset.rotateRt;
+      btn.disabled = true;
+      btn.textContent = 'Rotating…';
+      try {
+        const res = await apiFetch('/api/slot/rotate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: state.host, runtime, cwd, role, deleteOld: true }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          showToast(`Rotated ${runtime}:${role}`);
+          refresh(true);
+        } else {
+          showToast(`Rotate failed: ${json.error}`);
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Rotate';
+      }
+    });
+  });
 
   list.querySelectorAll('[data-copy]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -415,6 +483,41 @@ $('btn-doctor').addEventListener('click', async () => {
   const json = await res.json();
   out.textContent = JSON.stringify(json, null, 2);
 });
+
+async function runGc(apply) {
+  const box = $('gc-box');
+  box.classList.remove('hidden');
+  box.innerHTML = `<div class="meta">${apply ? 'Cleaning candidate sessions…' : 'Scanning sessions for GC…'}</div>`;
+  const res = await apiFetch('/api/gc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: state.host, forceEphemeral: true, apply }),
+  });
+  const json = await res.json();
+  if (!json.ok) {
+    box.innerHTML = `<div class="alert">${esc(json.error)}</div>`;
+    return;
+  }
+  const cands = json.candidates || [];
+  if (apply) {
+    showToast(`Deleted ${(json.deleted || []).length} session(s)`);
+    refresh(true);
+  }
+  box.innerHTML = `
+    <div class="card-head">
+      <strong>GC ${apply ? 'Result' : 'Preview'}: ${cands.length} candidate(s) (${json.protectedCount || 0} protected)</strong>
+      <button type="button" class="btn sm" id="close-gc">Close</button>
+    </div>
+    ${cands.length
+      ? `<div class="meta" style="margin:4px 0;">${cands.map((c) => `${esc(c.name || c.id.slice(0, 12))} [${esc(c.reason)}]`).join('<br>')}</div>`
+      : '<div class="meta">No rotated or ephemeral sessions to clean. Pinned slots are never touched.</div>'}
+    ${!apply && cands.length ? `<div class="card-actions"><button type="button" class="btn sm danger" id="apply-gc">Delete ${cands.length} candidate(s)</button></div>` : ''}
+  `;
+  $('close-gc')?.addEventListener('click', () => box.classList.add('hidden'));
+  $('apply-gc')?.addEventListener('click', () => runGc(true));
+}
+
+$('btn-gc').addEventListener('click', () => runGc(false));
 
 $('board-form').addEventListener('submit', async (e) => {
   e.preventDefault();

@@ -58,9 +58,10 @@ def record_run(entry: dict):
 
 
 class Daemon:
-    def __init__(self, ws, event_log=None):
+    def __init__(self, ws, event_log=None, approval_policy="never"):
         self.ws = ws
         self.event_log = event_log
+        self.approval_policy = approval_policy
         self.ids = itertools.count(1)
         self.pending = {}
         self.events = asyncio.Queue()
@@ -68,9 +69,9 @@ class Daemon:
         self.reader = asyncio.create_task(self._read())
 
     @classmethod
-    async def connect(cls, event_log=None):
+    async def connect(cls, event_log=None, approval_policy="never"):
         ws = await unix_connect(find_socket(), "ws://localhost/", max_size=None)
-        d = cls(ws, event_log)
+        d = cls(ws, event_log, approval_policy=approval_policy)
         await d.request(
             "initialize",
             {
@@ -97,19 +98,22 @@ class Daemon:
                 await self.events.put(msg)
 
     async def _answer_server_request(self, msg):
-        # Never silently approve privilege escalations: decline, record, and let the turn proceed.
+        # Honor the caller's configured approval policy: when 'never', accept; otherwise decline & record.
         method, params = msg["method"], msg.get("params", {})
-        self.approvals.append(
-            {
-                "method": method,
-                "command": params.get("command"),
-                "reason": params.get("reason"),
-            }
-        )
+        decision = "accept" if self.approval_policy == "never" else "decline"
+        if decision == "decline":
+            self.approvals.append(
+                {
+                    "method": method,
+                    "command": params.get("command"),
+                    "reason": params.get("reason"),
+                }
+            )
         if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
-            await self._send({"id": msg["id"], "result": {"decision": "decline"}})
+            await self._send({"id": msg["id"], "result": {"decision": decision}})
         elif method == "item/permissions/requestApproval":
-            await self._send({"id": msg["id"], "result": {"permissions": {}}})
+            perms = params.get("permissions", {}) if decision == "accept" else {}
+            await self._send({"id": msg["id"], "result": {"permissions": perms}})
         else:
             await self._send(
                 {
@@ -306,13 +310,13 @@ async def cmd_new(args):
     os.makedirs(args.out, exist_ok=True)
     prompt = read_prompt(args)
     with open(os.path.join(args.out, "events.jsonl"), "a", encoding="utf-8") as ev_log:
-        d = await Daemon.connect(ev_log)
+        d = await Daemon.connect(ev_log, approval_policy=args.approval_policy)
         cwd = os.path.abspath(args.cwd)
         params = {
             "cwd": cwd,
             "threadSource": "user",
             "sandbox": args.sandbox,
-            "approvalPolicy": "on-request",
+            "approvalPolicy": args.approval_policy,
         }
         if args.model:
             params["model"] = args.model
@@ -328,7 +332,7 @@ async def cmd_send(args):
     os.makedirs(args.out, exist_ok=True)
     prompt = read_prompt(args)
     with open(os.path.join(args.out, "events.jsonl"), "a", encoding="utf-8") as ev_log:
-        d = await Daemon.connect(ev_log)
+        d = await Daemon.connect(ev_log, approval_policy=args.approval_policy)
         r = await d.request("thread/resume", {"threadId": args.thread, "excludeTurns": True})
         thread_obj = r.get("thread", {})
         status = thread_obj.get("status")
@@ -399,11 +403,25 @@ def main():
     p = sub.add_parser("new")
     p.add_argument("--cwd", required=True)
     p.add_argument("--name")
-    p.add_argument("--sandbox", default="workspace-write", choices=["read-only", "workspace-write", "danger-full-access"])
+    p.add_argument(
+        "--sandbox",
+        default="danger-full-access",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+    )
+    p.add_argument(
+        "--approval-policy",
+        default="never",
+        choices=["never", "on-request", "on-failure", "untrusted"],
+    )
     turn_opts(p)
 
     p = sub.add_parser("send")
     p.add_argument("--thread", required=True)
+    p.add_argument(
+        "--approval-policy",
+        default="never",
+        choices=["never", "on-request", "on-failure", "untrusted"],
+    )
     turn_opts(p)
 
     for name in ("steer", "interrupt"):

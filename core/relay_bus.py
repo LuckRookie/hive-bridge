@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-"""Stateless SQLite blackboard / inbox + evidence helper for hive-bridge.
+"""Stateless SQLite blackboard / inbox + session slot registry + evidence helper for hive-bridge.
 
 Zero third-party dependencies (Python 3 stdlib only). Runs on the remote host
 and is invoked identically by local Antigravity (via SSH), remote Claude
 (Desktop Remote or CLI), and remote Codex sessions.
 
 Subcommands:
-  post       Post a message / task handoff to the shared board
-  inbox      List messages for a recipient (optionally unread only)
-  ack        Mark one or more messages as acknowledged / read
-  thread     Show all messages in a topic chronologically
-  topics     List recent topics with message counts & unread counts
-  recent     List recent messages across all topics
-  runs       List recent Codex / Claude runs recorded under ~/.hive-bridge/runs.jsonl
-  evidence   Read turn.json, summary.json, and tail of events.jsonl from a run dir
-  git-diff   Inspect git status --short and git diff for a remote directory
+  Board / Inbox:
+    post          Post a message / task handoff to the shared board
+    inbox         List messages for a recipient (optionally unread only)
+    ack           Mark one or more messages as acknowledged / read
+    thread        Show all messages in a topic chronologically
+    topics        List recent topics with message counts & unread counts
+    recent        List recent messages across all topics
+
+  Session Lifecycle (anti-sprawl):
+    slot-list     List pinned project/role session slots
+    slot-get      Get one slot by (cwd, runtime, role)
+    slot-set      Bind or update a slot
+    slot-clear    Remove a slot binding (optionally marking old session 'rotated')
+    meta-set      Tag a session as slot / ephemeral / rotated with TTL
+    meta-list     List session lifecycle tags
+    meta-del      Remove a session_meta entry
+    handoff-build Build a compact Markdown handoff packet from latest run + git status
+
+  Evidence & Verification:
+    runs          List recent Codex / Claude runs recorded under ~/.hive-bridge/runs.jsonl
+    evidence      Read turn.json, summary.json, and tail of events.jsonl from a run dir
+    git-diff      Inspect git status --short and git diff for a remote directory
 """
 
 import argparse
@@ -60,6 +73,37 @@ def connect_db(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient, acked_at, id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_topic ON messages(topic, id);")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS slots (
+            cwd         TEXT    NOT NULL,
+            runtime     TEXT    NOT NULL,
+            role        TEXT    NOT NULL,
+            thread_id   TEXT    NOT NULL,
+            name        TEXT    DEFAULT '',
+            turns       INTEGER DEFAULT 0,
+            last_out    TEXT    DEFAULT '',
+            created_at  REAL    NOT NULL,
+            updated_at  REAL    NOT NULL,
+            PRIMARY KEY (cwd, runtime, role)
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_meta (
+            runtime     TEXT    NOT NULL,
+            thread_id   TEXT    NOT NULL,
+            cwd         TEXT    DEFAULT '',
+            role        TEXT    DEFAULT '',
+            kind        TEXT    NOT NULL,
+            ttl_hours   REAL    DEFAULT 24.0,
+            created_at  REAL    NOT NULL,
+            updated_at  REAL    NOT NULL,
+            PRIMARY KEY (runtime, thread_id)
+        );
+        """
+    )
     conn.commit()
     return conn
 
@@ -84,6 +128,33 @@ def row_to_dict(row: sqlite3.Row) -> dict:
     }
 
 
+def slot_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "cwd": row["cwd"],
+        "runtime": row["runtime"],
+        "role": row["role"],
+        "threadId": row["thread_id"],
+        "name": row["name"] or "",
+        "turns": row["turns"] or 0,
+        "lastOut": row["last_out"] or "",
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def meta_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "runtime": row["runtime"],
+        "threadId": row["thread_id"],
+        "cwd": row["cwd"] or "",
+        "role": row["role"] or "",
+        "kind": row["kind"],
+        "ttlHours": row["ttl_hours"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def read_body(args) -> str:
     if getattr(args, "stdin", False):
         return sys.stdin.read()
@@ -96,6 +167,14 @@ def read_body(args) -> str:
     sys.exit("provide --text, --body-file, or --stdin")
 
 
+def norm_cwd(cwd: str) -> str:
+    return os.path.abspath(os.path.expanduser(cwd)) if cwd else ""
+
+
+# ---------------------------------------------------------------------------
+# Board / Inbox commands
+# ---------------------------------------------------------------------------
+
 def cmd_post(args):
     body = read_body(args).strip()
     if not body:
@@ -106,7 +185,7 @@ def cmd_post(args):
             meta = json.loads(args.meta)
         except json.JSONDecodeError as e:
             sys.exit(f"invalid --meta JSON: {e}")
-    cwd = os.path.abspath(args.cwd) if args.cwd else ""
+    cwd = norm_cwd(args.cwd)
     now = time.time()
     with connect_db() as conn:
         cur = conn.execute(
@@ -237,6 +316,173 @@ def cmd_recent(args):
         emit(row_to_dict(r))
 
 
+# ---------------------------------------------------------------------------
+# Session Slot & Lifecycle Meta commands
+# ---------------------------------------------------------------------------
+
+def cmd_slot_list(args):
+    clauses = []
+    params = []
+    if args.cwd:
+        clauses.append("cwd = ?")
+        params.append(norm_cwd(args.cwd))
+    if args.runtime:
+        clauses.append("runtime = ?")
+        params.append(args.runtime)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with connect_db() as conn:
+        rows = conn.execute(f"SELECT * FROM slots {where} ORDER BY updated_at DESC", params).fetchall()
+    for r in rows:
+        emit(slot_to_dict(r))
+
+
+def cmd_slot_get(args):
+    cwd = norm_cwd(args.cwd)
+    with connect_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM slots WHERE cwd = ? AND runtime = ? AND role = ?",
+            (cwd, args.runtime, args.role),
+        ).fetchone()
+    emit(slot_to_dict(row) if row else {"found": False, "cwd": cwd, "runtime": args.runtime, "role": args.role})
+
+
+def cmd_slot_set(args):
+    cwd = norm_cwd(args.cwd)
+    now = time.time()
+    with connect_db() as conn:
+        existing = conn.execute(
+            "SELECT * FROM slots WHERE cwd = ? AND runtime = ? AND role = ?",
+            (cwd, args.runtime, args.role),
+        ).fetchone()
+        old_thread = existing["thread_id"] if existing else None
+        if existing and old_thread == args.thread:
+            turns = (existing["turns"] or 0) + (1 if args.inc_turns else 0)
+            name = args.name if args.name is not None else existing["name"]
+            last_out = args.out if args.out is not None else existing["last_out"]
+            conn.execute(
+                "UPDATE slots SET name = ?, turns = ?, last_out = ?, updated_at = ? WHERE cwd = ? AND runtime = ? AND role = ?",
+                (name, turns, last_out, now, cwd, args.runtime, args.role),
+            )
+        else:
+            turns = 1 if args.inc_turns else 0
+            conn.execute(
+                """
+                INSERT INTO slots (cwd, runtime, role, thread_id, name, turns, last_out, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cwd, runtime, role) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    name = excluded.name,
+                    turns = excluded.turns,
+                    last_out = excluded.last_out,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at
+                """,
+                (cwd, args.runtime, args.role, args.thread, args.name or "", turns, args.out or "", now, now),
+            )
+            if old_thread and old_thread != args.thread:
+                conn.execute(
+                    """
+                    INSERT INTO session_meta (runtime, thread_id, cwd, role, kind, ttl_hours, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'rotated', 0, ?, ?)
+                    ON CONFLICT(runtime, thread_id) DO UPDATE SET kind = 'rotated', updated_at = excluded.updated_at
+                    """,
+                    (args.runtime, old_thread, cwd, args.role, now, now),
+                )
+        conn.execute(
+            """
+            INSERT INTO session_meta (runtime, thread_id, cwd, role, kind, ttl_hours, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'slot', 0, ?, ?)
+            ON CONFLICT(runtime, thread_id) DO UPDATE SET
+                cwd = excluded.cwd, role = excluded.role, kind = 'slot', updated_at = excluded.updated_at
+            """,
+            (args.runtime, args.thread, cwd, args.role, now, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM slots WHERE cwd = ? AND runtime = ? AND role = ?",
+            (cwd, args.runtime, args.role),
+        ).fetchone()
+    out = slot_to_dict(row)
+    if old_thread and old_thread != args.thread:
+        out["previousThreadId"] = old_thread
+    emit(out)
+
+
+def cmd_slot_clear(args):
+    cwd = norm_cwd(args.cwd)
+    now = time.time()
+    with connect_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM slots WHERE cwd = ? AND runtime = ? AND role = ?",
+            (cwd, args.runtime, args.role),
+        ).fetchone()
+        if not row:
+            emit({"cleared": False, "cwd": cwd, "runtime": args.runtime, "role": args.role})
+            return
+        conn.execute(
+            "DELETE FROM slots WHERE cwd = ? AND runtime = ? AND role = ?",
+            (cwd, args.runtime, args.role),
+        )
+        if args.mark_rotated:
+            conn.execute(
+                """
+                INSERT INTO session_meta (runtime, thread_id, cwd, role, kind, ttl_hours, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'rotated', 0, ?, ?)
+                ON CONFLICT(runtime, thread_id) DO UPDATE SET kind = 'rotated', updated_at = excluded.updated_at
+                """,
+                (args.runtime, row["thread_id"], cwd, args.role, now, now),
+            )
+    emit({"cleared": True, "previous": slot_to_dict(row)})
+
+
+def cmd_meta_set(args):
+    now = time.time()
+    cwd = norm_cwd(args.cwd) if args.cwd else ""
+    with connect_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO session_meta (runtime, thread_id, cwd, role, kind, ttl_hours, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(runtime, thread_id) DO UPDATE SET
+                cwd = COALESCE(NULLIF(excluded.cwd, ''), session_meta.cwd),
+                role = COALESCE(NULLIF(excluded.role, ''), session_meta.role),
+                kind = excluded.kind,
+                ttl_hours = excluded.ttl_hours,
+                updated_at = excluded.updated_at
+            """,
+            (args.runtime, args.thread, cwd, args.role or "", args.kind, args.ttl_hours, now, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM session_meta WHERE runtime = ? AND thread_id = ?",
+            (args.runtime, args.thread),
+        ).fetchone()
+    emit(meta_to_dict(row))
+
+
+def cmd_meta_list(args):
+    clauses = []
+    params = []
+    if args.runtime:
+        clauses.append("runtime = ?")
+        params.append(args.runtime)
+    if args.kind:
+        clauses.append("kind = ?")
+        params.append(args.kind)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with connect_db() as conn:
+        rows = conn.execute(f"SELECT * FROM session_meta {where} ORDER BY updated_at DESC", params).fetchall()
+    for r in rows:
+        emit(meta_to_dict(r))
+
+
+def cmd_meta_del(args):
+    with connect_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM session_meta WHERE runtime = ? AND thread_id = ?",
+            (args.runtime, args.thread),
+        )
+    emit({"deleted": cur.rowcount, "runtime": args.runtime, "threadId": args.thread})
+
+
 def _load_json_safe(path: Path):
     if not path.exists():
         return None
@@ -245,6 +491,64 @@ def _load_json_safe(path: Path):
     except Exception:
         return None
 
+
+def cmd_handoff_build(args):
+    cwd = norm_cwd(args.cwd)
+    sections = [
+        f"# Session Handoff ({args.role or 'worker'} @ {cwd})",
+        "",
+        "You are taking over a rotated Hive Bridge session slot with a fresh context window.",
+        "Review the summary and current workspace state below, then wait for (or execute) the next task.",
+    ]
+    if args.note:
+        sections.extend(["", "## Owner / Coordinator Note", args.note.strip()])
+
+    if args.out:
+        summary = _load_json_safe(Path(args.out).expanduser() / "summary.json")
+        if summary:
+            sections.extend(
+                [
+                    "",
+                    "## Previous Session Last Turn Summary",
+                    f"- Status: `{summary.get('status')}`",
+                    f"- Evidence dir: `{args.out}`",
+                ]
+            )
+            final_msg = (summary.get("finalMessage") or "").strip()
+            if final_msg:
+                sections.extend(["", "### Last Final Message", final_msg[:3000]])
+            cmds = summary.get("commands") or []
+            if cmds:
+                cmd_lines = [
+                    f"- `{c.get('command')}` (exit={c.get('exitCode')})" for c in cmds[-8:]
+                ]
+                sections.extend(["", "### Recent Commands", *cmd_lines])
+
+    if cwd and os.path.isdir(cwd):
+        rc = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, capture_output=True, text=True)
+        if rc.returncode == 0:
+            branch = rc.stdout.strip()
+            st = subprocess.run(["git", "status", "--short"], cwd=cwd, capture_output=True, text=True).stdout.strip()
+            diff_stat = subprocess.run(["git", "diff", "--stat"], cwd=cwd, capture_output=True, text=True).stdout.strip()
+            sections.extend(
+                [
+                    "",
+                    f"## Current Git State (`{branch}`)",
+                    "```text",
+                    st or "(clean working tree)",
+                    "```",
+                ]
+            )
+            if diff_stat:
+                sections.extend(["", "```text", diff_stat[:2000], "```"])
+
+    sections.extend(["", "Acknowledge concisely that you have absorbed this handoff and are ready."])
+    print("\n".join(sections))
+
+
+# ---------------------------------------------------------------------------
+# Evidence & Git verification
+# ---------------------------------------------------------------------------
 
 def cmd_runs(args):
     entries = []
@@ -257,7 +561,6 @@ def cmd_runs(args):
                 entries.append(json.loads(line))
             except Exception:
                 continue
-    # Deduplicate by outDir keeping latest entry
     by_out = {}
     for e in entries:
         out_dir = e.get("out")
@@ -265,7 +568,7 @@ def cmd_runs(args):
             by_out[out_dir] = {**by_out.get(out_dir, {}), **e}
     items = sorted(by_out.values(), key=lambda x: x.get("updatedAt") or x.get("startedAt") or 0, reverse=True)
     if args.cwd:
-        target = os.path.abspath(args.cwd)
+        target = norm_cwd(args.cwd)
         items = [i for i in items if i.get("cwd") == target]
     items = items[: args.limit]
     for item in items:
@@ -314,7 +617,7 @@ def cmd_evidence(args):
 
 
 def cmd_git_diff(args):
-    cwd = os.path.abspath(os.path.expanduser(args.cwd))
+    cwd = norm_cwd(args.cwd)
     if not os.path.isdir(cwd):
         sys.exit(f"directory not found: {cwd}")
 
@@ -349,52 +652,101 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("post", help="Post a message to the shared board")
-    p.add_argument("--from", dest="sender", required=True, help="Sender agent (e.g., antigravity, claude, codex, owner)")
-    p.add_argument("--to", dest="recipient", default="all", help="Recipient agent or 'all'")
-    p.add_argument("--topic", default="general", help="Topic / thread name")
-    p.add_argument("--text", help="Inline message text")
-    p.add_argument("--body-file", help="Read message body from file (or '-' for stdin)")
-    p.add_argument("--stdin", action="store_true", help="Read message body from stdin")
-    p.add_argument("--cwd", help="Related project directory")
-    p.add_argument("--artifact", help="Related evidence/file path on remote host")
-    p.add_argument("--meta", help="Optional JSON object with extra metadata")
+    # Board / Inbox
+    p = sub.add_parser("post")
+    p.add_argument("--from", dest="sender", required=True)
+    p.add_argument("--to", dest="recipient", default="all")
+    p.add_argument("--topic", default="general")
+    p.add_argument("--text")
+    p.add_argument("--body-file")
+    p.add_argument("--stdin", action="store_true")
+    p.add_argument("--cwd")
+    p.add_argument("--artifact")
+    p.add_argument("--meta")
 
-    p = sub.add_parser("inbox", help="Read inbox messages")
-    p.add_argument("--for", dest="recipient", help="Filter for recipient (includes 'all')")
-    p.add_argument("--topic", help="Filter by topic")
-    p.add_argument("--unread", action="store_true", help="Only unread messages")
-    p.add_argument("--since-id", type=int, help="Only messages with id > since-id")
-    p.add_argument("--limit", type=int, default=30)
-    p.add_argument("--brief", action="store_true", help="Human-readable compact summary (for hooks)")
-
-    p = sub.add_parser("ack", help="Mark messages acknowledged")
-    p.add_argument("ids", nargs="*", type=int)
-    p.add_argument("--all", action="store_true", help="Ack all unread messages for --for")
+    p = sub.add_parser("inbox")
     p.add_argument("--for", dest="recipient")
-    p.add_argument("--by", help="Who acknowledged")
+    p.add_argument("--topic")
+    p.add_argument("--unread", action="store_true")
+    p.add_argument("--since-id", type=int)
+    p.add_argument("--limit", type=int, default=30)
+    p.add_argument("--brief", action="store_true")
 
-    p = sub.add_parser("thread", help="Show messages in a topic")
+    p = sub.add_parser("ack")
+    p.add_argument("ids", nargs="*", type=int)
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--for", dest="recipient")
+    p.add_argument("--by")
+
+    p = sub.add_parser("thread")
     p.add_argument("topic")
     p.add_argument("--limit", type=int, default=50)
 
-    p = sub.add_parser("topics", help="List recent topics")
+    p = sub.add_parser("topics")
     p.add_argument("--limit", type=int, default=30)
 
-    p = sub.add_parser("recent", help="List recent messages across topics")
+    p = sub.add_parser("recent")
     p.add_argument("--topic")
     p.add_argument("--since-id", type=int)
     p.add_argument("--limit", type=int, default=50)
 
-    p = sub.add_parser("runs", help="List recent Codex/Claude run records")
+    # Slots & session lifecycle
+    p = sub.add_parser("slot-list")
+    p.add_argument("--cwd")
+    p.add_argument("--runtime", choices=["codex", "claude"])
+
+    p = sub.add_parser("slot-get")
+    p.add_argument("--cwd", required=True)
+    p.add_argument("--runtime", required=True, choices=["codex", "claude"])
+    p.add_argument("--role", required=True)
+
+    p = sub.add_parser("slot-set")
+    p.add_argument("--cwd", required=True)
+    p.add_argument("--runtime", required=True, choices=["codex", "claude"])
+    p.add_argument("--role", required=True)
+    p.add_argument("--thread", required=True)
+    p.add_argument("--name")
+    p.add_argument("--out")
+    p.add_argument("--inc-turns", action="store_true")
+
+    p = sub.add_parser("slot-clear")
+    p.add_argument("--cwd", required=True)
+    p.add_argument("--runtime", required=True, choices=["codex", "claude"])
+    p.add_argument("--role", required=True)
+    p.add_argument("--mark-rotated", action="store_true")
+
+    p = sub.add_parser("meta-set")
+    p.add_argument("--runtime", required=True, choices=["codex", "claude"])
+    p.add_argument("--thread", required=True)
+    p.add_argument("--kind", required=True, choices=["slot", "ephemeral", "rotated"])
+    p.add_argument("--cwd")
+    p.add_argument("--role")
+    p.add_argument("--ttl-hours", type=float, default=24.0)
+
+    p = sub.add_parser("meta-list")
+    p.add_argument("--runtime", choices=["codex", "claude"])
+    p.add_argument("--kind", choices=["slot", "ephemeral", "rotated"])
+
+    p = sub.add_parser("meta-del")
+    p.add_argument("--runtime", required=True, choices=["codex", "claude"])
+    p.add_argument("--thread", required=True)
+
+    p = sub.add_parser("handoff-build")
+    p.add_argument("--cwd", required=True)
+    p.add_argument("--out")
+    p.add_argument("--role")
+    p.add_argument("--note")
+
+    # Evidence & git
+    p = sub.add_parser("runs")
     p.add_argument("--cwd")
     p.add_argument("--limit", type=int, default=20)
 
-    p = sub.add_parser("evidence", help="Read turn.json, summary.json, and events tail from a run dir")
+    p = sub.add_parser("evidence")
     p.add_argument("--out", required=True)
     p.add_argument("--tail", type=int, default=30)
 
-    p = sub.add_parser("git-diff", help="Inspect git status and diff in a directory")
+    p = sub.add_parser("git-diff")
     p.add_argument("--cwd", required=True)
     p.add_argument("--max-bytes", type=int, default=24000)
 
